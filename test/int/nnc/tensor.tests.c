@@ -2,10 +2,14 @@
 #include "case.h"
 #include "ccv_case.h"
 #include "ccv_nnc_case.h"
+#include "nnc/ccv_nnc_internal.h"
 #include "nnc/ccv_nnc.h"
 #include "nnc/ccv_nnc_easy.h"
 #include "3rdparty/sqlite3/sqlite3.h"
 #include "3rdparty/dsfmt/dSFMT.h"
+#ifdef HAVE_CUDA
+#include "nnc/gpu/ccv_nnc_compat.h"
+#endif
 
 TEST_SETUP()
 {
@@ -63,17 +67,35 @@ TEST_CASE("tensor mapped from file")
 	one->data.f32[0] = 1;
 	ccv_nnc_tensor_t* one_gpu = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, 1), 0);
 	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(one), TENSOR_LIST(one_gpu), 0);
+	cudaStream_t stream = cuSharedFileIOStream();
 	ccv_nnc_tensor_t* tensor_a = ccv_nnc_tensor_new_from_file(GPU_TENSOR_NHWC(000, 32F, 5), "tensor.bin", 0, 0);
+	cuFileWaitOnStreamIfNotReady(stream);
 	ccv_nnc_tensor_t* a_result = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, 5), 0);
 	ccv_nnc_cmd_exec(CMD_ADD_FORWARD(0.5, 0.2), ccv_nnc_no_hint, 0, TENSOR_LIST(tensor_a, one_gpu), TENSOR_LIST(a_result), 0);
 	float a[] = {1 * 0.5 + 0.2, 2 * 0.5 + 0.2, 3 * 0.5 + 0.2, 4 * 0.5 + 0.2, 5 * 0.5 + 0.2};
 	ccv_nnc_tensor_t* tensor_b = ccv_nnc_tensor_new_from_file(GPU_TENSOR_NHWC(000, 32F, 4), "tensor.bin", (4096 * 4 * 4), 0);
+	cuFileWaitOnStreamIfNotReady(stream);
 	ccv_nnc_tensor_t* b_result = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, 4), 0);
 	ccv_nnc_cmd_exec(CMD_ADD_FORWARD(1, 1), ccv_nnc_no_hint, 0, TENSOR_LIST(tensor_b, one_gpu), TENSOR_LIST(b_result), 0);
 	float b[] = {4096 * 4 + 1 + 1, 4096 * 4 + 2 + 1, 4096 * 4 + 3 + 1, 4096 * 4 + 4 + 1};
 	ccv_nnc_tensor_t* at = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 5), 0);
 	ccv_nnc_tensor_t* bt = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 4), 0);
 	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(a_result, b_result), TENSOR_LIST(at, bt), 0);
+	fprintf(stderr, "\n");
+	fprintf(stderr, "\nat:\n");
+	for (i = 0; i < 5; i++)
+		fprintf(stderr, " %f", at->data.f32[i]);
+	fprintf(stderr, "\na:\n");
+	for (i = 0; i < 5; i++)
+		fprintf(stderr, " %f", a[i]);
+	fprintf(stderr, "\nbt:\n");
+	for (i = 0; i < 4; i++)
+		fprintf(stderr, " %f", bt->data.f32[i]);
+	fprintf(stderr, "\nb:\n");
+	for (i = 0; i < 4; i++)
+		fprintf(stderr, " %f", b[i]);
+	fprintf(stderr, "\n");
+
 	REQUIRE_ARRAY_EQ_WITH_TOLERANCE(float, at->data.f32, a, 5, 1e-5, "the first 5 element should be equal");
 	REQUIRE_ARRAY_EQ_WITH_TOLERANCE(float, bt->data.f32, b, 4, 1e-5, "the first 4 element should be equal");
 	ccv_nnc_tensor_free(tensor_a);

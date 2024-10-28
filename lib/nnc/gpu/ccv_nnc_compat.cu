@@ -4,8 +4,71 @@ extern "C" {
 #include <nnc/_ccv_nnc_stream.h>
 #include "3rdparty/khash/khash.h"
 }
+#include <fcntl.h>
+#include <sys/mman.h>
 
 static void cutrigmp(void);
+static ccv_nnc_cuda_file_entry file_map[MAX_FILES];
+
+ccv_nnc_cuda_file_entry ccv_nnc_get_file_entry(const char* filename) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (file_map[i].is_used && strcmp(file_map[i].filename, filename) == 0) {
+            return file_map[i];
+        }
+    }
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!file_map[i].is_used) {
+            memset(&file_map[i], 0, sizeof(ccv_nnc_cuda_file_entry));
+            strncpy(file_map[i].filename, filename, sizeof(file_map[i].filename) - 1);
+
+            file_map[i].file_descr.handle.fd = open(filename, O_RDONLY | O_DIRECT, 0);
+            if (file_map[i].file_descr.handle.fd < 0) {
+                fprintf(stderr, "Failed to open file: %s\n", filename);
+                exit(1);
+            }
+            file_map[i].file_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+            CUfileError_t status = cuFileHandleRegister(&file_map[i].file_handle, &file_map[i].file_descr);
+            if (status.err != CU_FILE_SUCCESS) {
+                fprintf(stderr, "Failed to register file handle for: %s\n", filename);
+                close(file_map[i].file_descr.handle.fd);
+                exit(1);
+            }
+
+            file_map[i].is_used = 1;
+            return file_map[i];
+        }
+    }
+
+    fprintf(stderr, "File map is full. Cannot open additional files.\n");
+    exit(1);
+}
+
+void ccv_nnc_cleanup_all_file_entries() {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (file_map[i].is_used) {
+            cuFileHandleDeregister(file_map[i].file_handle);
+            close(file_map[i].file_descr.handle.fd);
+            file_map[i].is_used = 0;
+        }
+    }
+}
+
+void ccv_nnc_remove_cuda_file_entry(const char* filename) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (file_map[i].is_used && strcmp(file_map[i].filename, filename) == 0) {
+		
+            cuFileHandleDeregister(file_map[i].file_handle);
+            close(file_map[i].file_descr.handle.fd);
+            file_map[i].is_used = 0;
+            memset(file_map[i].filename, 0, sizeof(file_map[i].filename));
+            return;
+        }
+    }
+
+    fprintf(stderr, "File entry for %s not found.\n", filename);
+}
 
 #ifdef HAVE_CUDNN
 struct cudnn_free_list_s {
@@ -191,6 +254,88 @@ void* cumalloc(int device, size_t size)
 		cudaMalloc(&ptr, size);
 	}
 	return ptr;
+}
+
+cudaStream_t cuSharedFileIOStream() {
+	static cudaStream_t cuFileIOStream = NULL;
+    if (cuFileIOStream == NULL) {
+        cudaStreamCreate(&cuFileIOStream);
+    }
+    return cuFileIOStream;
+}
+
+void* cuDirectFileReadAsync(int device, size_t size, const char* const filename, const off_t offset, cudaStream_t stream, CUfileHandle_t file_handle, CUfileDescr_t file_descr)
+{
+    CUfileError_t status;
+    void* ptr = NULL;
+
+    // Allocate GPU memory
+    ptr = (void*)cumalloc(device, size);
+    if (!ptr) {
+        return NULL;
+    }
+
+    // Prepare parameters for async read
+    size_t size_to_read = size;
+    off_t file_offset = offset;
+    off_t buffer_offset = 0;
+    ssize_t bytes_read = 0;
+
+    // Initiate asynchronous read
+    status = cuFileReadAsync(file_handle, 
+                           ptr,
+                           &size_to_read,
+                           &file_offset,
+                           &buffer_offset,
+                           &bytes_read,
+                           stream);
+
+    if (status.err != CU_FILE_SUCCESS) {
+        cufree(device, ptr);
+        return NULL;
+    }
+
+    return ptr;
+}
+
+void* cuDirectFileRead(int device, size_t size, const char* const filename, const off_t offset)
+{
+	CUfileError_t status;
+
+	// Allocate GPU memory
+	void* ptr = (void*)cumalloc(device, size);
+
+	// Open the file using cuFile
+	CUfileHandle_t file_handle;
+	CUfileDescr_t file_descr;
+	memset(&file_descr, 0, sizeof(CUfileDescr_t));
+	file_descr.handle.fd = open(filename, O_RDONLY | O_DIRECT, 0);
+	file_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+	
+	status = cuFileHandleRegister(&file_handle, &file_descr);
+	if (status.err != CU_FILE_SUCCESS) {
+		close(file_descr.handle.fd);
+		exit(1);
+	}
+
+	// Read the file directly into GPU memory
+	ssize_t bytes_read = cuFileRead(file_handle, ptr, size, offset, 0);
+
+	if (bytes_read < 0 || (size_t)bytes_read != size) {
+		cuFileHandleDeregister(file_handle);
+		close(file_descr.handle.fd);
+		exit(1);
+	}
+	
+	// Clean up
+	cuFileHandleDeregister(file_handle);
+	close(file_descr.handle.fd);
+	return ptr;
+}
+
+void cuFileWaitOnStreamIfNotReady(cudaStream_t stream)
+{
+	cudaStreamSynchronize(stream);
 }
 
 void cufree(int device, void* ptr)

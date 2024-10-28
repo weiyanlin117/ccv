@@ -19,6 +19,8 @@ extern "C" {
 #endif
 #include "nnc/ccv_nnc.h"
 #include "nnc/_ccv_nnc_stream.h"
+#include <cuda_runtime.h>
+#include <cufile.h>  // For GPUDirect Storage
 
 // Simple counterparts of ccmalloc / ccfree.
 void* cumalloc(int device, size_t size);
@@ -33,6 +35,24 @@ typedef void(*cump_f)(int device_id, void* const context);
 int curegmp(int device_id, cump_f func, void* const context); // register memory pressure handler
 void cuunregmp(const int id); // un-register memory pressure handler.
 void cusetprofiler(int state);
+
+void* cuDirectFileRead(int device, size_t size, const char* const filename, const off_t offset);
+void* cuDirectFileReadAsync(int device, size_t size, const char* const filename, const off_t offset, cudaStream_t stream, CUfileHandle_t file_handle, CUfileDescr_t file_descr);
+cudaStream_t cuSharedFileIOStream();
+void cuFileWaitOnStreamIfNotReady(cudaStream_t stream);
+
+#define MAX_FILES 100
+
+typedef struct {
+    char filename[256];             
+    CUfileHandle_t file_handle;     
+    CUfileDescr_t file_descr;       
+    int is_used;                    
+} ccv_nnc_cuda_file_entry;
+
+ccv_nnc_cuda_file_entry ccv_nnc_get_file_entry(const char* filename);
+void ccv_nnc_cleanup_all_file_entries();
+void ccv_nnc_remove_cuda_file_entry(const char* filename);
 
 // Stream context
 CCV_WARN_UNUSED(ccv_nnc_stream_context_t*) ccv_nnc_init_stream_context(ccv_nnc_stream_context_t* const stream_context);
