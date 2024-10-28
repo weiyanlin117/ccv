@@ -109,12 +109,6 @@ void mfa::cache<mfa::adam::hash, mfa::adam::pipeline>::prepare(mfa::context* con
 }
 
 template <>
-void mfa::cache<mfa::cmul::hash, mfa::cmul::pipeline>::prepare(mfa::context* context, mfa::cmul::hash hash)
-{
-  _mfa_cache_prepare(&map, context, hash);
-}
-
-template <>
 void mfa::cache<mfa::gemv::hash, mfa::gemv::pipeline>::prepare(mfa::context* context, mfa::gemv::hash hash)
 {
   _mfa_cache_prepare(&map, context, hash);

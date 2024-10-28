@@ -28,8 +28,6 @@ public:
   uint32_t dim[4];
 
   hash(ccv_nnc_mfa_cmul_params_t);
-  
-  bool operator==(const hash& rhs) const;
 };
 
 class pipeline {
@@ -46,14 +44,6 @@ public:
 } // namespace mfa
 } // namespace nnc
 } // namespace ccv
-
-std::ostream& operator<<(std::ostream& os, const ccv::nnc::mfa::cmul::hash& hash);
-
-template<>
-struct std::hash<ccv::nnc::mfa::cmul::hash>
-{
-  std::size_t operator()(const ccv::nnc::mfa::cmul::hash& hash) const noexcept;
-};
 
 extern "C" {
 #endif // __cplusplus
