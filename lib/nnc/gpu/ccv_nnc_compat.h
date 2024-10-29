@@ -38,8 +38,8 @@ void cusetprofiler(int state);
 
 void* cuDirectFileRead(int device, size_t size, const char* const filename, const off_t offset);
 void* cuDirectFileReadAsync(int device, size_t size, const char* const filename, const off_t offset, cudaStream_t stream, CUfileHandle_t file_handle, CUfileDescr_t file_descr);
-cudaStream_t cuSharedFileIOStream();
-void cuFileWaitOnStreamIfNotReady(cudaStream_t stream);
+cudaStream_t cuSharedFileIOStream(void);
+cudaError_t cuSharedStreamSync(void);
 
 #define MAX_FILES 100
 

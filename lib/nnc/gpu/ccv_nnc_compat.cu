@@ -256,12 +256,22 @@ void* cumalloc(int device, size_t size)
 	return ptr;
 }
 
-cudaStream_t cuSharedFileIOStream() {
-	static cudaStream_t cuFileIOStream = NULL;
-    if (cuFileIOStream == NULL) {
-        cudaStreamCreate(&cuFileIOStream);
+static cudaStream_t g_stream = NULL;
+
+cudaStream_t cuSharedFileIOStream(void) {
+    if (g_stream == NULL) {
+        if (cudaStreamCreate(&g_stream) != cudaSuccess) {
+            return NULL;
+        }
     }
-    return cuFileIOStream;
+    return g_stream;
+}
+
+cudaError_t cuSharedStreamSync(void) {
+    if (g_stream != NULL) {
+        return cudaStreamSynchronize(g_stream);
+    }
+    return cudaSuccess;
 }
 
 void* cuDirectFileReadAsync(int device, size_t size, const char* const filename, const off_t offset, cudaStream_t stream, CUfileHandle_t file_handle, CUfileDescr_t file_descr)
@@ -334,7 +344,8 @@ void* cuDirectFileRead(int device, size_t size, const char* const filename, cons
 }
 
 void cuFileWaitOnStreamIfNotReady(cudaStream_t stream)
-{
+{	
+	fprintf(stderr, "cuSharedFileIOStream: %p\n", stream);
 	cudaStreamSynchronize(stream);
 }
 
