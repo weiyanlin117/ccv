@@ -143,11 +143,10 @@ ccv_nnc_tensor_t* ccv_nnc_tensor_new_from_file(const ccv_nnc_tensor_param_t para
 			// async:
 			// cudaStream_t stream = cuSharedFileIOStream();
 			
-			
 			ccv_nnc_cuda_file_entry file_entry = ccv_nnc_get_file_entry(filename);
 			// Open the file using cuFile	
 			tensor->data.u8 = (uint8_t*)cuDirectFileReadAsync(CCV_TENSOR_GET_DEVICE_ID(params.type), size, filename, offset, cuSharedFileIOStream(), file_entry.file_handle, file_entry.file_descr);
-			cuSharedStreamSync();
+
 			// sync:
 			// tensor->data.u8 = (uint8_t*)cuDirectFileRead(CCV_TENSOR_GET_DEVICE_ID(params.type), size, filename, offset);
 

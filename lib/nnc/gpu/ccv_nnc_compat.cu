@@ -13,6 +13,7 @@ static ccv_nnc_cuda_file_entry file_map[MAX_FILES];
 ccv_nnc_cuda_file_entry ccv_nnc_get_file_entry(const char* filename) {
     for (int i = 0; i < MAX_FILES; i++) {
         if (file_map[i].is_used && strcmp(file_map[i].filename, filename) == 0) {
+			fprintf(stderr, "hit cache register file handle for: %s\n", filename);
             return file_map[i];
         }
     }
@@ -286,10 +287,15 @@ void* cuDirectFileReadAsync(int device, size_t size, const char* const filename,
     }
 
     // Prepare parameters for async read
-    size_t size_to_read = size;
-    off_t file_offset = offset;
-    off_t buffer_offset = 0;
-    ssize_t bytes_read = 0;
+    static size_t size_to_read;
+    static off_t file_offset;
+    static off_t buffer_offset;
+    static ssize_t bytes_read;
+
+	size_to_read = size;
+	file_offset = offset;
+	buffer_offset = 0;
+	bytes_read = 0;
 
     // Initiate asynchronous read
     status = cuFileReadAsync(file_handle, 
