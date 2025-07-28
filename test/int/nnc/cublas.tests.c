@@ -1,5 +1,10 @@
 #include "case.h"
+#ifdef HAVE_CUDA
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#endif
 #include "ccv_case.h"
+#include "nnc/ccv_nnc_internal.h"
 #include "ccv_nnc_case.h"
 #include <ccv.h>
 #include <nnc/ccv_nnc.h>
@@ -3228,6 +3233,2235 @@ TEST_CASE("cmul gradient in half precision")
 	ccv_nnc_tensor_arena_free(tensor_arena);
 	ccv_nnc_graph_exec_arena_free(graph_exec_arena);
 	ccv_nnc_symbolic_graph_free(symbolic_graph);
+}
+
+TEST_CASE("scaled dot product attention with sage_attn")
+{
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+	// SageAttention-specific test focused on head_dim=128 and no causal masking
+#define num_trials 6
+	for (int trial = 0; trial < num_trials; ++trial) {
+		// Test cases optimized for SageAttention: head_dim=128, no causal masking
+		int B_candidates[num_trials] = {  1,   2,   4,   8,  16,  32 };
+		int R_candidates[num_trials] = { 64,  128, 256, 512, 1024, 2048 };
+		int C_candidates[num_trials] = { 64,  128, 256, 512, 1024, 2048 };
+		int Hq_candidates[num_trials] = {  8,   8,   8,  16,   32,   64 };
+		int Hk_candidates[num_trials] = {  8,   8,   8,  16,   32,   64 };
+		int D_candidates[num_trials] = { 128, 128, 128, 128,  128,  128 }; // Only head_dim=128 supported
+		int is_causal_candidates[num_trials] = {  0,   0,   0,   0,    0,    0 }; // No causal masking for now
+		
+		int B = B_candidates[trial];
+		int R = R_candidates[trial];
+		int C = C_candidates[trial];
+		int Hq = Hq_candidates[trial];
+		int Hk = Hk_candidates[trial];
+		int D = D_candidates[trial];
+		int is_causal = is_causal_candidates[trial];
+		float scale = 1.0 / sqrt((float)D);
+		
+		printf("SageAttention test trial %d: B=%d, R=%d, C=%d, Hq=%d, Hk=%d, D=%d\n", 
+		       trial, B, R, C, Hq, Hk, D);
+		
+		GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+		
+		// Create CPU reference tensors
+		ccv_nnc_tensor_t* const q_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const k_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const v_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, C, Hk, D), 0);
+		
+		// Initialize with deterministic data for reproducible testing
+		for (int i = 0; i < B * R * Hq * D; ++i) {
+			q_tensor->data.f32[i] = (float)(i % 1000) / 1000.0f - 0.5f;
+		}
+		for (int i = 0; i < B * C * Hk * D; ++i) {
+			k_tensor->data.f32[i] = (float)(i % 1000) / 1000.0f - 0.5f;
+		}
+		for (int i = 0; i < B * C * Hk * D; ++i) {
+			v_tensor->data.f32[i] = (float)(i % 1000) / 1000.0f - 0.5f;
+		}
+		
+		// Compute CPU reference (using existing CPU implementation)
+		ccv_nnc_tensor_t* const o_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, Hq, D), 0);
+		ccv_nnc_cmd_exec(CMD_SCALED_DOT_PRODUCT_ATTENTION_FORWARD(scale, is_causal), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(q_tensor, k_tensor, v_tensor, NULL, NULL, NULL), 
+		                 TENSOR_LIST(o_tensor, NULL), 0);
+		
+		// Convert to FP16 for GPU
+		ccv_nnc_tensor_t* const q_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const k_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const v_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, C, Hk, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(q_tensor, k_tensor, v_tensor), 
+		                 TENSOR_LIST(q_tensor_f16, k_tensor_f16, v_tensor_f16), 0);
+		
+		// Create GPU tensors
+		ccv_nnc_tensor_t* const gpu_q_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const gpu_k_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const gpu_v_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const gpu_o_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, Hq, D), 0);
+		
+		// Transfer to GPU
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(q_tensor_f16, k_tensor_f16, v_tensor_f16), 
+		                 TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor), 0);
+		
+		// Run SageAttention on GPU
+		ccv_nnc_cmd_exec(CMD_SCALED_DOT_PRODUCT_ATTENTION_FORWARD(scale, is_causal), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor, NULL, NULL, NULL), 
+		                 TENSOR_LIST(gpu_o_tensor, NULL), 0);
+		
+		// Transfer result back to CPU
+		ccv_nnc_tensor_t* const copy_of_gpu_o_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, Hq, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_o_tensor), 
+		                 TENSOR_LIST(copy_of_gpu_o_tensor_f16), 0);
+		
+		// Convert back to FP32 for comparison
+		ccv_nnc_tensor_t* const copy_of_gpu_o_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, Hq, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(copy_of_gpu_o_tensor_f16), 
+		                 TENSOR_LIST(copy_of_gpu_o_tensor), 0);
+		
+		// Compare with relaxed tolerance due to fake quantization
+		// Note: Using 1e-2 tolerance instead of 3e-3 due to FP16->int8 fake quantization
+		REQUIRE_ARRAY_EQ_WITH_TOLERANCE(float, copy_of_gpu_o_tensor->data.f32, o_tensor->data.f32, 
+		                                B * R * Hq * D, 1e-2, 
+		                                "SageAttention GPU output should match CPU reference");
+		
+		// Cleanup
+		ccv_nnc_tensor_free(q_tensor);
+		ccv_nnc_tensor_free(k_tensor);
+		ccv_nnc_tensor_free(v_tensor);
+		ccv_nnc_tensor_free(o_tensor);
+		ccv_nnc_tensor_free(q_tensor_f16);
+		ccv_nnc_tensor_free(k_tensor_f16);
+		ccv_nnc_tensor_free(v_tensor_f16);
+		ccv_nnc_tensor_free(gpu_q_tensor);
+		ccv_nnc_tensor_free(gpu_k_tensor);
+		ccv_nnc_tensor_free(gpu_v_tensor);
+		ccv_nnc_tensor_free(gpu_o_tensor);
+		ccv_nnc_tensor_free(copy_of_gpu_o_tensor_f16);
+		ccv_nnc_tensor_free(copy_of_gpu_o_tensor);
+	}
+#undef num_trials
+}
+
+// CPU reference implementation matching SageAttention GPU quantization logic
+static void cpu_quantize_int8_per_block(const float* input, int8_t* output, float* scales,
+                                       int batch_size, int num_tokens, int num_heads, int head_dim,
+                                       const uint32_t BLOCK_SIZE)
+{
+	const int scale_blocks_per_seq = (num_tokens + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	
+	// SageAttention GPU uses grid=(num_blocks, num_heads, batch_size)
+	// Each CUDA block processes BLOCK_SIZE tokens collaboratively
+	for (int b = 0; b < batch_size; b++) {
+		for (int h = 0; h < num_heads; h++) {
+			for (int block_idx = 0; block_idx < scale_blocks_per_seq; block_idx++) {
+				const int token_start = block_idx * BLOCK_SIZE;
+				const int token_end = (token_start + BLOCK_SIZE) < num_tokens ? 
+				                     (token_start + BLOCK_SIZE) : num_tokens;
+				
+				// Find max absolute value in this block for this head
+				// This exactly matches blockReduceMax() behavior in GPU kernel
+				float max_val = 0.0f;
+				for (int t = token_start; t < token_end; t++) {
+					for (int d = 0; d < head_dim; d++) {
+						const int idx = b * num_tokens * num_heads * head_dim + 
+						               t * num_heads * head_dim + h * head_dim + d;
+						max_val = fmaxf(max_val, fabsf(input[idx]));
+					}
+				}
+				
+				// Compute scale exactly like GPU: s_amax / 127.0f
+				const float scale = max_val / 127.0f;
+				const int scale_idx = b * num_heads * scale_blocks_per_seq + h * scale_blocks_per_seq + block_idx;
+				scales[scale_idx] = scale;
+				
+				// Quantize values using tmp_scale = 127.0f / s_amax (matching GPU)
+				const float tmp_scale = (max_val > 1e-8f) ? (127.0f / max_val) : 0.0f;
+				for (int t = token_start; t < token_end; t++) {
+					for (int d = 0; d < head_dim; d++) {
+						const int idx = b * num_tokens * num_heads * head_dim + 
+						               t * num_heads * head_dim + h * head_dim + d;
+						// Use float_to_int8_rn equivalent: roundf with saturation
+						const float quantized = roundf(input[idx] * tmp_scale);
+						output[idx] = (int8_t)fmaxf(-128.0f, fminf(127.0f, quantized));
+					}
+				}
+			}
+		}
+	}
+}
+
+// CPU reference implementation for per-thread quantization (each element gets own scale)
+static void cpu_quantize_int8_per_thread(const float* input, int8_t* output, float* scales,
+                                        int batch_size, int num_tokens, int num_heads, int head_dim)
+{
+	// Per-thread: each element gets its own scale factor
+	// Scale tensor shape: [batch_size, num_tokens, num_heads, head_dim]
+	for (int b = 0; b < batch_size; b++) {
+		for (int t = 0; t < num_tokens; t++) {
+			for (int h = 0; h < num_heads; h++) {
+				for (int d = 0; d < head_dim; d++) {
+					const int idx = b * num_tokens * num_heads * head_dim + 
+					               t * num_heads * head_dim + h * head_dim + d;
+					
+					// Each element gets its own scale
+					const float abs_val = fabsf(input[idx]);
+					const float scale = abs_val / 127.0f;
+					scales[idx] = scale;
+					
+					// Quantize single element
+					const float tmp_scale = (abs_val > 1e-8f) ? (127.0f / abs_val) : 0.0f;
+					const float quantized = roundf(input[idx] * tmp_scale);
+					output[idx] = (int8_t)fmaxf(-128.0f, fminf(127.0f, quantized));
+				}
+			}
+		}
+	}
+}
+
+TEST_CASE("sage attention quantization ccv_nnc_per_warp_int8 test light")
+{
+	ccv_cli_set_output_levels(CCV_CLI_VERBOSE);
+
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+	                  ccv_nnc_cmd_ok(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+	
+	printf("=== CCV SageAttention Per-Warp Quantization Light Test ===\n");
+	
+	// Test parameters matching PyTorch per_warp_int8 defaults
+	const int B = 1;      // batch size
+	const int R = 64;     // sequence length
+	const int H = 8;      // number of heads  
+	const int D = 128;    // head dimension
+	const uint32_t BLKQ = 128;  // Block size for Q (PyTorch default)
+	const uint32_t WARPQ = 32;  // Warp size for Q (PyTorch default)
+	const uint32_t BLKK = 64;   // Block size for K (PyTorch default)
+
+	// Create input tensors
+	ccv_nnc_tensor_t* const q_input_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_input_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_mean_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, D), 0);
+
+	// Load input data from PyTorch test
+	FILE* q_input_file = fopen("/tmp/test_q_input.bin", "rb");
+	if (q_input_file) {
+		fread(q_input_tensor->data.f32, sizeof(float), B * R * H * D, q_input_file);
+		fclose(q_input_file);
+		printf("✓ Loaded Q input from /tmp/test_q_input.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_q_input.bin\n");
+		return;
+	}
+	
+	FILE* k_input_file = fopen("/tmp/test_k_input.bin", "rb");
+	if (k_input_file) {
+		fread(k_input_tensor->data.f32, sizeof(float), B * R * H * D, k_input_file);
+		fclose(k_input_file);
+		printf("✓ Loaded K input from /tmp/test_k_input.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_k_input.bin\n");
+		return; 
+	}
+	
+	FILE* k_mean_file = fopen("/tmp/test_k_mean.bin", "rb");
+	if (k_mean_file) {
+		fread(k_mean_tensor->data.f32, sizeof(float), B * H * D, k_mean_file);
+		fclose(k_mean_file);
+		printf("✓ Loaded K mean input from /tmp/test_k_mean.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_k_mean.bin\n");
+		return; 
+	}
+	printf("k_mean_tensor\n");
+	ccv_nnc_print_tensor_info(k_mean_tensor);
+	// Convert to FP16 and transfer to GPU
+	ccv_nnc_tensor_t* const q_input_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_input_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_mean_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, D), 0);
+
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(q_input_tensor), TENSOR_LIST(q_input_tensor_f16), 0);
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_input_tensor), TENSOR_LIST(k_input_tensor_f16), 0);
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_mean_tensor), TENSOR_LIST(k_mean_tensor_f16), 0);
+
+	ccv_nnc_tensor_t* const gpu_q_input_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_input_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_mean_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, D), 0);
+
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(q_input_tensor_f16), TENSOR_LIST(gpu_q_input_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_input_tensor_f16), TENSOR_LIST(gpu_k_input_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_mean_tensor_f16), TENSOR_LIST(gpu_k_mean_tensor), 0);
+
+	printf("Input shapes: Q[%d,%d,%d,%d], K[%d,%d,%d,%d]\n", B, R, H, D, B, R, H, D);
+	
+	// Print input data for verification against PyTorch
+	printf("Q_input sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", q_input_tensor->data.f32[i]);
+	}
+	printf("\n");
+	
+	printf("K_input sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", k_input_tensor->data.f32[i]);
+	}
+	printf("\n");
+	
+	printf("K_mean sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", k_mean_tensor->data.f32[i]);
+	}
+	printf("\n");
+
+	// Calculate input ranges
+	float q_min = q_input_tensor->data.f32[0], q_max = q_input_tensor->data.f32[0];
+	float k_min = k_input_tensor->data.f32[0], k_max = k_input_tensor->data.f32[0];
+	for (int i = 1; i < B * R * H * D; i++) {
+		if (q_input_tensor->data.f32[i] < q_min) q_min = q_input_tensor->data.f32[i];
+		if (q_input_tensor->data.f32[i] > q_max) q_max = q_input_tensor->data.f32[i];
+		if (k_input_tensor->data.f32[i] < k_min) k_min = k_input_tensor->data.f32[i];
+		if (k_input_tensor->data.f32[i] > k_max) k_max = k_input_tensor->data.f32[i];
+	}
+	printf("Q_input range: [%.6f, %.6f]\n", q_min, q_max);
+	printf("K_input range: [%.6f, %.6f]\n", k_min, k_max);
+	
+	// Calculate output sizes
+	const size_t output_size = B * R * H * D;
+	const size_t q_blocks = (R + BLKQ - 1) / BLKQ;
+	const size_t warps_per_block = BLKQ / WARPQ;
+	const size_t q_scale_size = B * H * q_blocks * warps_per_block;
+	const size_t k_scale_size = B * H * ((R + BLKK - 1) / BLKK);
+	
+	// Create output tensors for the new tensor-based API
+	ccv_nnc_tensor_t* const gpu_q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, R, H, D), 0);
+	// Calculate exact scale dimensions
+	const int q_scale_blocks = q_blocks * warps_per_block;  // Should be 4
+	const int k_scale_blocks = (R + BLKK - 1) / BLKK;      // Should be 1
+	
+	printf("Scale tensor calculations: q_blocks=%zu, warps_per_block=%zu, q_scale_blocks=%d\n", 
+	       q_blocks, warps_per_block, q_scale_blocks);
+	printf("Expected Q scale shape: [%d, %d, %d]\n", B, H, q_scale_blocks);
+	printf("Expected K scale shape: [%d, %d, %d]\n", B, H, k_scale_blocks);
+	
+	ccv_nnc_tensor_t* const gpu_q_scales_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* const gpu_k_scales_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, k_scale_blocks), 0);
+	printf("\n");
+
+	// Run quantization using new CCV wrapper function
+#ifdef HAVE_CUDA_SM80
+	extern int ccv_nnc_per_warp_int8(
+    ccv_nnc_tensor_t* const q,       // Input Q tensor (FP16)
+    ccv_nnc_tensor_t* const k,       // Input K tensor (FP16)
+    ccv_nnc_tensor_t* const q_int8,  // Output Q quantized (INT8)
+    ccv_nnc_tensor_t* const k_int8,  // Output K quantized (INT8)
+    ccv_nnc_tensor_t* const q_scale, // Output Q scales (FP32)
+    ccv_nnc_tensor_t* const k_scale, // Output K scales (FP32)
+    ccv_nnc_tensor_t* const km,      // Optional K mean tensor (not used currently)
+    int BLKQ,                        // Block size for Q (default 128)
+    int WARPQ,                       // Warp size for Q (default 32)
+    int BLKK,                        // Block size for K (default 64)
+    int tensor_layout,               // 0=NHD, 1=HND
+    ccv_nnc_stream_context_t* const stream_context);
+	
+	printf("Running CCV per-warp quantization (new API)...\n");
+	
+	// Q: per-warp quantization using new wrapper
+	// Note: CCV tensors are in NHWC format, which is tensor_layout=0 (NHD)
+	ccv_nnc_stream_context_t* stream_context = ccv_nnc_stream_context_new(CCV_STREAM_CONTEXT_GPU);
+	// int q_result = ccv_nnc_quant_per_warp_int8_cuda(
+	// 	gpu_q_input_tensor,      // Input FP16 tensor
+	// 	gpu_q_int8_tensor,       // Output INT8 tensor  
+	// 	gpu_q_scales_tensor,     // Output FP32 scale tensor
+	// 	BLKQ,                    // block_size = 128
+	// 	WARPQ,                   // warp_block_size = 32
+	// 	0,                       // tensor_layout = 0 (NHD/NHWC)
+	// 	stream_context
+	// );
+	
+	// int k_mean_result = ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda(
+	// 	gpu_k_input_tensor,      // Input FP16 tensor
+	// 	gpu_k_mean_tensor,      // Input FP16 tensor
+	// 	gpu_k_int8_tensor,       // Output INT8 tensor
+	// 	gpu_k_scales_tensor,     // Output FP32 scale tensor
+	// 	BLKK,                    // block_size = 64
+	// 	0,                       // tensor_layout = 0 (NHD/NHWC)
+	// 	stream_context
+	// );
+	
+	int result = ccv_nnc_per_warp_int8(
+		gpu_q_input_tensor,       // Input Q tensor (FP16)
+		gpu_k_input_tensor,       // Input K tensor (FP16)
+		gpu_q_int8_tensor,  // Output Q quantized (INT8)
+		gpu_k_int8_tensor,  // Output K quantized (INT8)
+		gpu_q_scales_tensor, // Output Q scales (FP32)
+		gpu_k_scales_tensor, // Output K scales (FP32)
+		gpu_k_mean_tensor,      // Optional K mean tensor (not used currently)
+		BLKQ,                        // Block size for Q (default 128)
+		WARPQ,                       // Warp size for Q (default 32)
+		BLKK,                        // Block size for K (default 64)
+		0,               // 0=NHD, 1=HND
+    stream_context);
+	if (result == 0) {
+		printf("✓ CCV quantization completed successfully\n");
+		
+		// Copy tensor results to CPU for both Q and K
+		ccv_nnc_tensor_t* const cpu_q_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, R, H, D), 0);
+		ccv_nnc_tensor_t* const cpu_q_scales_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, q_scale_blocks, 1), 0);
+		ccv_nnc_tensor_t* const cpu_k_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, R, H, D), 0);
+		ccv_nnc_tensor_t* const cpu_k_scales_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, k_scale_blocks, 1), 0);
+		
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_q_int8_tensor), TENSOR_LIST(cpu_q_int8_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_q_scales_tensor), TENSOR_LIST(cpu_q_scales_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_k_int8_tensor), TENSOR_LIST(cpu_k_int8_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_k_scales_tensor), TENSOR_LIST(cpu_k_scales_tensor), 0);
+		
+		// Print sample outputs
+		printf("Q_int8 sample (first 10): ");
+		for (int i = 0; i < 10; i++) printf("%d ", (int8_t)cpu_q_int8_tensor->data.u8[i]);
+		printf("\n");
+		
+		printf("Q_scales sample (first 10): ");
+		for (int i = 0; i < 10 && i < q_scale_size; i++) printf("%.6f ", cpu_q_scales_tensor->data.f32[i]);
+		printf("\n");
+		
+		printf("K_int8 sample (first 10): ");
+		for (int i = 0; i < 10; i++) printf("%d ", (int8_t)cpu_k_int8_tensor->data.u8[i]);
+		printf("\n");
+		
+		printf("K_scales sample (first 10): ");
+		for (int i = 0; i < 10 && i < k_scale_size; i++) printf("%.6f ", cpu_k_scales_tensor->data.f32[i]);
+		printf("\n");
+		
+		// Save outputs to disk
+		FILE* q_int8_file = fopen("/tmp/ccv_q_int8.bin", "wb");
+		if (q_int8_file) {
+			fwrite(cpu_q_int8_tensor->data.u8, sizeof(int8_t), output_size, q_int8_file);
+			fclose(q_int8_file);
+			printf("✓ Saved Q_int8 to /tmp/ccv_q_int8.bin\n");
+		}
+		
+		FILE* k_int8_file = fopen("/tmp/ccv_k_int8.bin", "wb");
+		if (k_int8_file) {
+			fwrite(cpu_k_int8_tensor->data.u8, sizeof(int8_t), output_size, k_int8_file);
+			fclose(k_int8_file);
+			printf("✓ Saved K_int8 to /tmp/ccv_k_int8.bin\n");
+		}
+		
+		FILE* q_scales_file = fopen("/tmp/ccv_q_scales.bin", "wb");
+		if (q_scales_file) {
+			fwrite(cpu_q_scales_tensor->data.f32, sizeof(float), q_scale_size, q_scales_file);
+			fclose(q_scales_file);
+			printf("✓ Saved Q_scales to /tmp/ccv_q_scales.bin\n");
+		}
+		
+		FILE* k_scales_file = fopen("/tmp/ccv_k_scales.bin", "wb");
+		if (k_scales_file) {
+			fwrite(cpu_k_scales_tensor->data.f32, sizeof(float), k_scale_size, k_scales_file);
+			fclose(k_scales_file);
+			printf("✓ Saved K_scales to /tmp/ccv_k_scales.bin\n");
+		}
+		
+		printf("Output sizes: Q_int8=%zu, Q_scales=%zu, K_int8=%zu, K_scales=%zu\n",
+		       output_size, q_scale_size, output_size, k_scale_size);
+		
+		// Clean up CPU tensors
+		ccv_nnc_tensor_free(cpu_q_int8_tensor);
+		ccv_nnc_tensor_free(cpu_q_scales_tensor);
+		ccv_nnc_tensor_free(cpu_k_int8_tensor);
+		ccv_nnc_tensor_free(cpu_k_scales_tensor);
+	} else {
+		printf("❌ CCV quantization failed: result=%d\n", result);
+	}
+#else
+	printf("❌ CUDA SM80 not available\n");
+	int q_result = -1;
+	int k_result = -1;
+#endif
+	
+	// Cleanup tensors
+	ccv_nnc_tensor_free(q_input_tensor);
+	ccv_nnc_tensor_free(k_input_tensor);
+		ccv_nnc_tensor_free(k_mean_tensor);
+	ccv_nnc_tensor_free(q_input_tensor_f16);
+	ccv_nnc_tensor_free(k_input_tensor_f16);
+		ccv_nnc_tensor_free(k_mean_tensor_f16);
+	ccv_nnc_tensor_free(gpu_q_input_tensor);
+	ccv_nnc_tensor_free(gpu_k_input_tensor);
+		ccv_nnc_tensor_free(gpu_k_mean_tensor);
+	ccv_nnc_tensor_free(gpu_q_int8_tensor);
+	ccv_nnc_tensor_free(gpu_k_int8_tensor);
+	ccv_nnc_tensor_free(gpu_q_scales_tensor);
+	ccv_nnc_tensor_free(gpu_k_scales_tensor);
+	ccv_nnc_stream_context_free(stream_context);
+	
+	printf("CCV quantization light test completed\n");
+	REQUIRE(result == 0, "CCV quantization should succeed");
+}
+
+TEST_CASE("sage attention quantization per-warp sub mean test light")
+{
+	ccv_cli_set_output_levels(CCV_CLI_VERBOSE);
+
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+	                  ccv_nnc_cmd_ok(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+	
+	printf("=== CCV SageAttention Per-Warp Quantization Light Test ===\n");
+	
+	// Test parameters matching PyTorch per_warp_int8 defaults
+	const int B = 1;      // batch size
+	const int R = 64;     // sequence length
+	const int H = 8;      // number of heads  
+	const int D = 128;    // head dimension
+	const uint32_t BLKQ = 128;  // Block size for Q (PyTorch default)
+	const uint32_t WARPQ = 32;  // Warp size for Q (PyTorch default)
+	const uint32_t BLKK = 64;   // Block size for K (PyTorch default)
+
+	// Create input tensors
+	ccv_nnc_tensor_t* const q_input_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_input_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_mean_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, D), 0);
+
+	// Load input data from PyTorch test
+	FILE* q_input_file = fopen("/tmp/test_q_input.bin", "rb");
+	if (q_input_file) {
+		fread(q_input_tensor->data.f32, sizeof(float), B * R * H * D, q_input_file);
+		fclose(q_input_file);
+		printf("✓ Loaded Q input from /tmp/test_q_input.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_q_input.bin\n");
+		return;
+	}
+	
+	FILE* k_input_file = fopen("/tmp/test_k_input.bin", "rb");
+	if (k_input_file) {
+		fread(k_input_tensor->data.f32, sizeof(float), B * R * H * D, k_input_file);
+		fclose(k_input_file);
+		printf("✓ Loaded K input from /tmp/test_k_input.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_k_input.bin\n");
+		return; 
+	}
+	
+	FILE* k_mean_file = fopen("/tmp/test_k_mean.bin", "rb");
+	if (k_mean_file) {
+		fread(k_mean_tensor->data.f32, sizeof(float), B * H * D, k_mean_file);
+		fclose(k_mean_file);
+		printf("✓ Loaded K mean input from /tmp/test_k_mean.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_k_mean.bin\n");
+		return; 
+	}
+	printf("k_mean_tensor\n");
+	ccv_nnc_print_tensor_info(k_mean_tensor);
+	// Convert to FP16 and transfer to GPU
+	ccv_nnc_tensor_t* const q_input_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_input_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_mean_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, D), 0);
+
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(q_input_tensor), TENSOR_LIST(q_input_tensor_f16), 0);
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_input_tensor), TENSOR_LIST(k_input_tensor_f16), 0);
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_mean_tensor), TENSOR_LIST(k_mean_tensor_f16), 0);
+
+	ccv_nnc_tensor_t* const gpu_q_input_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_input_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_mean_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, D), 0);
+
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(q_input_tensor_f16), TENSOR_LIST(gpu_q_input_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_input_tensor_f16), TENSOR_LIST(gpu_k_input_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_mean_tensor_f16), TENSOR_LIST(gpu_k_mean_tensor), 0);
+
+	printf("Input shapes: Q[%d,%d,%d,%d], K[%d,%d,%d,%d]\n", B, R, H, D, B, R, H, D);
+	
+	// Print input data for verification against PyTorch
+	printf("Q_input sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", q_input_tensor->data.f32[i]);
+	}
+	printf("\n");
+	
+	printf("K_input sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", k_input_tensor->data.f32[i]);
+	}
+	printf("\n");
+	
+	printf("K_mean sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", k_mean_tensor->data.f32[i]);
+	}
+	printf("\n");
+
+	// Calculate input ranges
+	float q_min = q_input_tensor->data.f32[0], q_max = q_input_tensor->data.f32[0];
+	float k_min = k_input_tensor->data.f32[0], k_max = k_input_tensor->data.f32[0];
+	for (int i = 1; i < B * R * H * D; i++) {
+		if (q_input_tensor->data.f32[i] < q_min) q_min = q_input_tensor->data.f32[i];
+		if (q_input_tensor->data.f32[i] > q_max) q_max = q_input_tensor->data.f32[i];
+		if (k_input_tensor->data.f32[i] < k_min) k_min = k_input_tensor->data.f32[i];
+		if (k_input_tensor->data.f32[i] > k_max) k_max = k_input_tensor->data.f32[i];
+	}
+	printf("Q_input range: [%.6f, %.6f]\n", q_min, q_max);
+	printf("K_input range: [%.6f, %.6f]\n", k_min, k_max);
+	
+	// Calculate output sizes
+	const size_t output_size = B * R * H * D;
+	const size_t q_blocks = (R + BLKQ - 1) / BLKQ;
+	const size_t warps_per_block = BLKQ / WARPQ;
+	const size_t q_scale_size = B * H * q_blocks * warps_per_block;
+	const size_t k_scale_size = B * H * ((R + BLKK - 1) / BLKK);
+	
+	// Create output tensors for the new tensor-based API
+	ccv_nnc_tensor_t* const gpu_q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, R, H, D), 0);
+	// Calculate exact scale dimensions
+	const int q_scale_blocks = q_blocks * warps_per_block;  // Should be 4
+	const int k_scale_blocks = (R + BLKK - 1) / BLKK;      // Should be 1
+	
+	printf("Scale tensor calculations: q_blocks=%zu, warps_per_block=%zu, q_scale_blocks=%d\n", 
+	       q_blocks, warps_per_block, q_scale_blocks);
+	printf("Expected Q scale shape: [%d, %d, %d]\n", B, H, q_scale_blocks);
+	printf("Expected K scale shape: [%d, %d, %d]\n", B, H, k_scale_blocks);
+	
+	ccv_nnc_tensor_t* const gpu_q_scales_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* const gpu_k_scales_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, k_scale_blocks), 0);
+	printf("\n");
+
+	// Run quantization using new CCV wrapper function
+#ifdef HAVE_CUDA_SM80
+	extern int ccv_nnc_quant_per_warp_int8_cuda(
+		ccv_nnc_tensor_t* const input,
+		ccv_nnc_tensor_t* const output,
+		ccv_nnc_tensor_t* const scale,
+		int block_size,
+		int warp_block_size,
+		int tensor_layout,
+		ccv_nnc_stream_context_t* const stream_context);
+	
+	printf("Running CCV per-warp quantization (new API)...\n");
+	
+	// Q: per-warp quantization using new wrapper
+	// Note: CCV tensors are in NHWC format, which is tensor_layout=0 (NHD)
+	ccv_nnc_stream_context_t* stream_context = ccv_nnc_stream_context_new(CCV_STREAM_CONTEXT_GPU);
+	int q_result = ccv_nnc_quant_per_warp_int8_cuda(
+		gpu_q_input_tensor,      // Input FP16 tensor
+		gpu_q_int8_tensor,       // Output INT8 tensor  
+		gpu_q_scales_tensor,     // Output FP32 scale tensor
+		BLKQ,                    // block_size = 128
+		WARPQ,                   // warp_block_size = 32
+		0,                       // tensor_layout = 0 (NHD/NHWC)
+		stream_context
+	);
+	
+	// K: per-block quantization using new tensor API
+	extern int ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda(
+    ccv_nnc_tensor_t* const input,   // Input tensor (FP16)
+    ccv_nnc_tensor_t* const mean,    // Mean tensor (FP16)
+    ccv_nnc_tensor_t* const output,  // Output tensor (INT8)
+    ccv_nnc_tensor_t* const scale,   // Scale tensor (FP32)
+    int block_size,                  // Block size (e.g., 64)
+    int tensor_layout,               // 0=NHD, 1=HND
+    ccv_nnc_stream_context_t* const stream_context);
+	
+	int k_mean_result = ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda(
+		gpu_k_input_tensor,      // Input FP16 tensor
+		gpu_k_mean_tensor,      // Input FP16 tensor
+		gpu_k_int8_tensor,       // Output INT8 tensor
+		gpu_k_scales_tensor,     // Output FP32 scale tensor
+		BLKK,                    // block_size = 64
+		0,                       // tensor_layout = 0 (NHD/NHWC)
+		stream_context
+	);
+	
+	if (q_result == 0 && k_mean_result == 0) {
+		printf("✓ CCV quantization completed successfully\n");
+		
+		// Copy tensor results to CPU for both Q and K
+		ccv_nnc_tensor_t* const cpu_q_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, R, H, D), 0);
+		ccv_nnc_tensor_t* const cpu_q_scales_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, q_scale_blocks, 1), 0);
+		ccv_nnc_tensor_t* const cpu_k_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, R, H, D), 0);
+		ccv_nnc_tensor_t* const cpu_k_scales_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, k_scale_blocks, 1), 0);
+		
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_q_int8_tensor), TENSOR_LIST(cpu_q_int8_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_q_scales_tensor), TENSOR_LIST(cpu_q_scales_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_k_int8_tensor), TENSOR_LIST(cpu_k_int8_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_k_scales_tensor), TENSOR_LIST(cpu_k_scales_tensor), 0);
+		
+		// Print sample outputs
+		printf("Q_int8 sample (first 10): ");
+		for (int i = 0; i < 10; i++) printf("%d ", (int8_t)cpu_q_int8_tensor->data.u8[i]);
+		printf("\n");
+		
+		printf("Q_scales sample (first 10): ");
+		for (int i = 0; i < 10 && i < q_scale_size; i++) printf("%.6f ", cpu_q_scales_tensor->data.f32[i]);
+		printf("\n");
+		
+		printf("K_int8 sample (first 10): ");
+		for (int i = 0; i < 10; i++) printf("%d ", (int8_t)cpu_k_int8_tensor->data.u8[i]);
+		printf("\n");
+		
+		printf("K_scales sample (first 10): ");
+		for (int i = 0; i < 10 && i < k_scale_size; i++) printf("%.6f ", cpu_k_scales_tensor->data.f32[i]);
+		printf("\n");
+		
+		// Save outputs to disk
+		FILE* q_int8_file = fopen("/tmp/ccv_q_int8.bin", "wb");
+		if (q_int8_file) {
+			fwrite(cpu_q_int8_tensor->data.u8, sizeof(int8_t), output_size, q_int8_file);
+			fclose(q_int8_file);
+			printf("✓ Saved Q_int8 to /tmp/ccv_q_int8.bin\n");
+		}
+		
+		FILE* k_int8_file = fopen("/tmp/ccv_k_int8.bin", "wb");
+		if (k_int8_file) {
+			fwrite(cpu_k_int8_tensor->data.u8, sizeof(int8_t), output_size, k_int8_file);
+			fclose(k_int8_file);
+			printf("✓ Saved K_int8 to /tmp/ccv_k_int8.bin\n");
+		}
+		
+		FILE* q_scales_file = fopen("/tmp/ccv_q_scales.bin", "wb");
+		if (q_scales_file) {
+			fwrite(cpu_q_scales_tensor->data.f32, sizeof(float), q_scale_size, q_scales_file);
+			fclose(q_scales_file);
+			printf("✓ Saved Q_scales to /tmp/ccv_q_scales.bin\n");
+		}
+		
+		FILE* k_scales_file = fopen("/tmp/ccv_k_scales.bin", "wb");
+		if (k_scales_file) {
+			fwrite(cpu_k_scales_tensor->data.f32, sizeof(float), k_scale_size, k_scales_file);
+			fclose(k_scales_file);
+			printf("✓ Saved K_scales to /tmp/ccv_k_scales.bin\n");
+		}
+		
+		printf("Output sizes: Q_int8=%zu, Q_scales=%zu, K_int8=%zu, K_scales=%zu\n",
+		       output_size, q_scale_size, output_size, k_scale_size);
+		
+		// Clean up CPU tensors
+		ccv_nnc_tensor_free(cpu_q_int8_tensor);
+		ccv_nnc_tensor_free(cpu_q_scales_tensor);
+		ccv_nnc_tensor_free(cpu_k_int8_tensor);
+		ccv_nnc_tensor_free(cpu_k_scales_tensor);
+	} else {
+		printf("❌ CCV quantization failed: Q=%d, K=%d\n", q_result, k_mean_result);
+	}
+#else
+	printf("❌ CUDA SM80 not available\n");
+	int q_result = -1;
+	int k_result = -1;
+#endif
+	
+	// Cleanup tensors
+	ccv_nnc_tensor_free(q_input_tensor);
+	ccv_nnc_tensor_free(k_input_tensor);
+		ccv_nnc_tensor_free(k_mean_tensor);
+	ccv_nnc_tensor_free(q_input_tensor_f16);
+	ccv_nnc_tensor_free(k_input_tensor_f16);
+		ccv_nnc_tensor_free(k_mean_tensor_f16);
+	ccv_nnc_tensor_free(gpu_q_input_tensor);
+	ccv_nnc_tensor_free(gpu_k_input_tensor);
+		ccv_nnc_tensor_free(gpu_k_mean_tensor);
+	ccv_nnc_tensor_free(gpu_q_int8_tensor);
+	ccv_nnc_tensor_free(gpu_k_int8_tensor);
+	ccv_nnc_tensor_free(gpu_q_scales_tensor);
+	ccv_nnc_tensor_free(gpu_k_scales_tensor);
+	ccv_nnc_stream_context_free(stream_context);
+	
+	printf("CCV quantization light test completed\n");
+	REQUIRE(q_result == 0 && k_mean_result == 0, "CCV quantization should succeed");
+}
+
+TEST_CASE("sage attention quantization per-warp test light")
+{
+	ccv_cli_set_output_levels(CCV_CLI_INFO);
+
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+	                  ccv_nnc_cmd_ok(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+	
+	printf("=== CCV SageAttention Per-Warp Quantization Light Test ===\n");
+	
+	// Test parameters matching PyTorch per_warp_int8 defaults
+	const int B = 1;      // batch size
+	const int R = 64;     // sequence length
+	const int H = 8;      // number of heads  
+	const int D = 128;    // head dimension
+	const uint32_t BLKQ = 128;  // Block size for Q (PyTorch default)
+	const uint32_t WARPQ = 32;  // Warp size for Q (PyTorch default)
+	const uint32_t BLKK = 64;   // Block size for K (PyTorch default)
+	
+	// Create input tensors
+	ccv_nnc_tensor_t* const q_input_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_input_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, H, D), 0);
+	
+	// Load input data from PyTorch test
+	FILE* q_input_file = fopen("/tmp/test_q_input.bin", "rb");
+	if (q_input_file) {
+		fread(q_input_tensor->data.f32, sizeof(float), B * R * H * D, q_input_file);
+		fclose(q_input_file);
+		printf("✓ Loaded Q input from /tmp/test_q_input.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_q_input.bin\n");
+		return;
+	}
+	
+	FILE* k_input_file = fopen("/tmp/test_k_input.bin", "rb");
+	if (k_input_file) {
+		fread(k_input_tensor->data.f32, sizeof(float), B * R * H * D, k_input_file);
+		fclose(k_input_file);
+		printf("✓ Loaded K input from /tmp/test_k_input.bin\n");
+	} else {
+		printf("❌ Could not load /tmp/test_k_input.bin\n");
+		return; 
+	}
+	
+	// Convert to FP16 and transfer to GPU
+	ccv_nnc_tensor_t* const q_input_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const k_input_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, H, D), 0);
+	
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(q_input_tensor), TENSOR_LIST(q_input_tensor_f16), 0);
+	ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_input_tensor), TENSOR_LIST(k_input_tensor_f16), 0);
+	
+	ccv_nnc_tensor_t* const gpu_q_input_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_input_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, H, D), 0);
+	
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(q_input_tensor_f16), TENSOR_LIST(gpu_q_input_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+	                 TENSOR_LIST(k_input_tensor_f16), TENSOR_LIST(gpu_k_input_tensor), 0);
+	
+	printf("Input shapes: Q[%d,%d,%d,%d], K[%d,%d,%d,%d]\n", B, R, H, D, B, R, H, D);
+	
+	// Print input data for verification against PyTorch
+	printf("Q_input sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", q_input_tensor->data.f32[i]);
+	}
+	printf("\n");
+	
+	printf("K_input sample (first 10): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.6f ", k_input_tensor->data.f32[i]);
+	}
+	printf("\n");
+	
+	// Calculate input ranges
+	float q_min = q_input_tensor->data.f32[0], q_max = q_input_tensor->data.f32[0];
+	float k_min = k_input_tensor->data.f32[0], k_max = k_input_tensor->data.f32[0];
+	for (int i = 1; i < B * R * H * D; i++) {
+		if (q_input_tensor->data.f32[i] < q_min) q_min = q_input_tensor->data.f32[i];
+		if (q_input_tensor->data.f32[i] > q_max) q_max = q_input_tensor->data.f32[i];
+		if (k_input_tensor->data.f32[i] < k_min) k_min = k_input_tensor->data.f32[i];
+		if (k_input_tensor->data.f32[i] > k_max) k_max = k_input_tensor->data.f32[i];
+	}
+	printf("Q_input range: [%.6f, %.6f]\n", q_min, q_max);
+	printf("K_input range: [%.6f, %.6f]\n", k_min, k_max);
+	
+	// Calculate output sizes
+	const size_t output_size = B * R * H * D;
+	const size_t q_blocks = (R + BLKQ - 1) / BLKQ;
+	const size_t warps_per_block = BLKQ / WARPQ;
+	const size_t q_scale_size = B * H * q_blocks * warps_per_block;
+	const size_t k_scale_size = B * H * ((R + BLKK - 1) / BLKK);
+	
+	// Create output tensors for the new tensor-based API
+	ccv_nnc_tensor_t* const gpu_q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, R, H, D), 0);
+	ccv_nnc_tensor_t* const gpu_k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, R, H, D), 0);
+	// Calculate exact scale dimensions
+	const int q_scale_blocks = q_blocks * warps_per_block;  // Should be 4
+	const int k_scale_blocks = (R + BLKK - 1) / BLKK;      // Should be 1
+	
+	printf("Scale tensor calculations: q_blocks=%zu, warps_per_block=%zu, q_scale_blocks=%d\n", 
+	       q_blocks, warps_per_block, q_scale_blocks);
+	printf("Expected Q scale shape: [%d, %d, %d]\n", B, H, q_scale_blocks);
+	printf("Expected K scale shape: [%d, %d, %d]\n", B, H, k_scale_blocks);
+	
+	ccv_nnc_tensor_t* const gpu_q_scales_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* const gpu_k_scales_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, k_scale_blocks), 0);
+	printf("gpu_q_scales_tensor\n");
+	ccv_nnc_print_tensor_info(gpu_q_scales_tensor);
+	printf("gpu_k_scales_tensor\n");
+	ccv_nnc_print_tensor_info(gpu_k_scales_tensor);
+	printf("\n");
+
+	// Run quantization using new CCV wrapper function
+#ifdef HAVE_CUDA_SM80
+	extern int ccv_nnc_quant_per_warp_int8_cuda(
+		ccv_nnc_tensor_t* const input,
+		ccv_nnc_tensor_t* const output,
+		ccv_nnc_tensor_t* const scale,
+		int block_size,
+		int warp_block_size,
+		int tensor_layout,
+		ccv_nnc_stream_context_t* const stream_context);
+	
+	printf("Running CCV per-warp quantization (new API)...\n");
+	
+	// Q: per-warp quantization using new wrapper
+	// Note: CCV tensors are in NHWC format, which is tensor_layout=0 (NHD)
+	ccv_nnc_stream_context_t* stream_context = ccv_nnc_stream_context_new(CCV_STREAM_CONTEXT_GPU);
+	int q_result = ccv_nnc_quant_per_warp_int8_cuda(
+		gpu_q_input_tensor,      // Input FP16 tensor
+		gpu_q_int8_tensor,       // Output INT8 tensor  
+		gpu_q_scales_tensor,     // Output FP32 scale tensor
+		BLKQ,                    // block_size = 128
+		WARPQ,                   // warp_block_size = 32
+		0,                       // tensor_layout = 0 (NHD/NHWC)
+		stream_context
+	);
+	
+	// K: per-block quantization using new tensor API
+	extern int ccv_nnc_quant_per_block_int8_cuda(
+		ccv_nnc_tensor_t* const input,
+		ccv_nnc_tensor_t* const output,
+		ccv_nnc_tensor_t* const scale,
+		int block_size,
+		int tensor_layout,
+		ccv_nnc_stream_context_t* const stream_context);
+	
+	int k_result = ccv_nnc_quant_per_block_int8_cuda(
+		gpu_k_input_tensor,      // Input FP16 tensor
+		gpu_k_int8_tensor,       // Output INT8 tensor
+		gpu_k_scales_tensor,     // Output FP32 scale tensor
+		BLKK,                    // block_size = 64
+		0,                       // tensor_layout = 0 (NHD/NHWC)
+		stream_context
+	);
+	
+	if (q_result == 0 && k_result == 0) {
+		printf("✓ CCV quantization completed successfully\n");
+		
+		// Copy tensor results to CPU for both Q and K
+		ccv_nnc_tensor_t* const cpu_q_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, R, H, D), 0);
+		ccv_nnc_tensor_t* const cpu_q_scales_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, q_scale_blocks, 1), 0);
+		ccv_nnc_tensor_t* const cpu_k_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, R, H, D), 0);
+		ccv_nnc_tensor_t* const cpu_k_scales_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, k_scale_blocks, 1), 0);
+		
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_q_int8_tensor), TENSOR_LIST(cpu_q_int8_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_q_scales_tensor), TENSOR_LIST(cpu_q_scales_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_k_int8_tensor), TENSOR_LIST(cpu_k_int8_tensor), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, 
+		                 TENSOR_LIST(gpu_k_scales_tensor), TENSOR_LIST(cpu_k_scales_tensor), 0);
+		
+		// Print sample outputs
+		printf("Q_int8 sample (first 10): ");
+		for (int i = 0; i < 10; i++) printf("%d ", cpu_q_int8_tensor->data.u8[i]);
+		printf("\n");
+		
+		printf("Q_scales sample (first 10): ");
+		for (int i = 0; i < 10 && i < q_scale_size; i++) printf("%.6f ", cpu_q_scales_tensor->data.f32[i]);
+		printf("\n");
+		
+		printf("K_int8 sample (first 10): ");
+		for (int i = 0; i < 10; i++) printf("%d ", cpu_k_int8_tensor->data.u8[i]);
+		printf("\n");
+		
+		printf("K_scales sample (first 10): ");
+		for (int i = 0; i < 10 && i < k_scale_size; i++) printf("%.6f ", cpu_k_scales_tensor->data.f32[i]);
+		printf("\n");
+		
+		// Save outputs to disk
+		FILE* q_int8_file = fopen("/tmp/ccv_q_int8.bin", "wb");
+		if (q_int8_file) {
+			fwrite(cpu_q_int8_tensor->data.u8, sizeof(int8_t), output_size, q_int8_file);
+			fclose(q_int8_file);
+			printf("✓ Saved Q_int8 to /tmp/ccv_q_int8.bin\n");
+		}
+		
+		FILE* k_int8_file = fopen("/tmp/ccv_k_int8.bin", "wb");
+		if (k_int8_file) {
+			fwrite(cpu_k_int8_tensor->data.u8, sizeof(int8_t), output_size, k_int8_file);
+			fclose(k_int8_file);
+			printf("✓ Saved K_int8 to /tmp/ccv_k_int8.bin\n");
+		}
+		
+		FILE* q_scales_file = fopen("/tmp/ccv_q_scales.bin", "wb");
+		if (q_scales_file) {
+			fwrite(cpu_q_scales_tensor->data.f32, sizeof(float), q_scale_size, q_scales_file);
+			fclose(q_scales_file);
+			printf("✓ Saved Q_scales to /tmp/ccv_q_scales.bin\n");
+		}
+		
+		FILE* k_scales_file = fopen("/tmp/ccv_k_scales.bin", "wb");
+		if (k_scales_file) {
+			fwrite(cpu_k_scales_tensor->data.f32, sizeof(float), k_scale_size, k_scales_file);
+			fclose(k_scales_file);
+			printf("✓ Saved K_scales to /tmp/ccv_k_scales.bin\n");
+		}
+		
+		printf("Output sizes: Q_int8=%zu, Q_scales=%zu, K_int8=%zu, K_scales=%zu\n",
+		       output_size, q_scale_size, output_size, k_scale_size);
+		
+		// Clean up CPU tensors
+		ccv_nnc_tensor_free(cpu_q_int8_tensor);
+		ccv_nnc_tensor_free(cpu_q_scales_tensor);
+		ccv_nnc_tensor_free(cpu_k_int8_tensor);
+		ccv_nnc_tensor_free(cpu_k_scales_tensor);
+	} else {
+		printf("❌ CCV quantization failed: Q=%d, K=%d\n", q_result, k_result);
+	}
+#else
+	printf("❌ CUDA SM80 not available\n");
+	int q_result = -1;
+	int k_result = -1;
+#endif
+	
+	// Cleanup tensors
+	ccv_nnc_tensor_free(q_input_tensor);
+	ccv_nnc_tensor_free(k_input_tensor);
+	ccv_nnc_tensor_free(q_input_tensor_f16);
+	ccv_nnc_tensor_free(k_input_tensor_f16);
+	ccv_nnc_tensor_free(gpu_q_input_tensor);
+	ccv_nnc_tensor_free(gpu_k_input_tensor);
+	ccv_nnc_tensor_free(gpu_q_int8_tensor);
+	ccv_nnc_tensor_free(gpu_k_int8_tensor);
+	ccv_nnc_tensor_free(gpu_q_scales_tensor);
+	ccv_nnc_tensor_free(gpu_k_scales_tensor);
+	ccv_nnc_stream_context_free(stream_context);
+	
+	printf("CCV quantization light test completed\n");
+	REQUIRE(q_result == 0 && k_result == 0, "CCV quantization should succeed");
+}
+
+TEST_CASE("sage kernel test")
+{
+	printf("=== Raw SageAttention Kernel Test ===\n");
+	printf("This test bypasses CCV wrapper and calls the raw kernel directly\n");
+	
+	// 1. Load PyTorch parameters and quantized data from disk
+	FILE* param_file = fopen("/tmp/pytorch_kernel_params.json", "r");
+	if (!param_file) {
+		printf("❌ Run: python extract_pytorch_deterministic.py first\n");
+		return;
+	}
+	fclose(param_file);
+	
+	// PyTorch's exact parameters
+	const int B = 1, R = 64, C = 64, H = 8, D = 128;
+	const float sm_scale = 0.08838834764831843f;
+	
+	printf("Loading PyTorch quantized inputs: B=%d, R=%d, C=%d, H=%d, D=%d\n", B, R, C, H, D);
+	
+	// Load PyTorch's quantized data (exactly as PyTorch saved it)
+	int8_t* q_int8_data = (int8_t*)malloc(B * H * R * D * sizeof(int8_t));
+	int8_t* k_int8_data = (int8_t*)malloc(B * H * C * D * sizeof(int8_t));  
+	__fp16* v_fp16_data = (__fp16*)malloc(B * H * C * D * sizeof(__fp16));
+	float* q_scales_data = (float*)malloc(B * H * 4 * sizeof(float));  // PyTorch: per-warp (4 warps per head)
+	float* k_scales_data = (float*)malloc(B * H * 1 * sizeof(float));  // PyTorch: per-block (1 per head)
+	
+	// Read binary files (PyTorch format: BRHD for tensors, BH4/BH1 for scales)
+	FILE* f;
+	f = fopen("/tmp/pytorch_kernel_q_int8.bin", "rb");
+	fread(q_int8_data, sizeof(int8_t), B * H * R * D, f); fclose(f);
+	f = fopen("/tmp/pytorch_kernel_k_int8.bin", "rb"); 
+	fread(k_int8_data, sizeof(int8_t), B * H * C * D, f); fclose(f);
+	f = fopen("/tmp/pytorch_kernel_v_fp16.bin", "rb");
+	fread(v_fp16_data, sizeof(__fp16), B * H * C * D, f); fclose(f);
+	f = fopen("/tmp/pytorch_kernel_q_scales.bin", "rb");
+	fread(q_scales_data, sizeof(float), B * H * 4, f); fclose(f);
+	f = fopen("/tmp/pytorch_kernel_k_scales.bin", "rb");
+	fread(k_scales_data, sizeof(float), B * H * 1, f); fclose(f);
+	
+	printf("✅ Loaded PyTorch quantized data from disk\n");
+	printf("Sample values: Q_int8[0]=%d, K_int8[0]=%d, V[0]=%f\n", 
+		q_int8_data[0], k_int8_data[0], (float)v_fp16_data[0]);
+	printf("Sample scales: Q_scale[0]=%f, K_scale[0]=%f\n", 
+		q_scales_data[0], k_scales_data[0]);
+	
+	// Debug: Print scale tensor layouts
+	printf("Scale tensor debug info:\n");
+	printf("  Q scales (per-warp): [%f, %f, %f, %f] for head 0\n",
+		q_scales_data[0], q_scales_data[1], q_scales_data[2], q_scales_data[3]);
+	printf("  K scales (per-block): [%f] for head 0\n", k_scales_data[0]);
+	printf("  Expected Q scale shape: [B=1, H=8, 4 warps] = [1, 8, 4]\n");
+	printf("  Expected K scale shape: [B=1, H=8, 1 block] = [1, 8, 1]\n");
+	
+	printf("\n=== CCV Input Data Verification ===\n");
+	printf("Q_int8 data (first 10 values): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%d ", q_int8_data[i]);
+	}
+	printf("\n");
+	
+	printf("Q_int8 data (last 10 values): ");
+	int total_elements = B * H * R * D;
+	for (int i = total_elements - 10; i < total_elements; i++) {
+		printf("%d ", q_int8_data[i]);
+	}
+	printf("\n");
+	
+	printf("K_int8 data (first 10 values): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%d ", k_int8_data[i]);
+	}
+	printf("\n");
+	
+	printf("K_int8 data (last 10 values): ");
+	for (int i = total_elements - 10; i < total_elements; i++) {
+		printf("%d ", k_int8_data[i]);
+	}
+	printf("\n");
+	
+	printf("V data (first 10 values): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%.4f ", (float)v_fp16_data[i]);
+	}
+	printf("\n");
+	
+	printf("V data (last 10 values): ");
+	for (int i = total_elements - 10; i < total_elements; i++) {
+		printf("%.4f ", (float)v_fp16_data[i]);
+	}
+	printf("\n");
+	
+	// Find min/max for Q_int8, K_int8, V
+	int8_t q_min = q_int8_data[0], q_max = q_int8_data[0];
+	int8_t k_min = k_int8_data[0], k_max = k_int8_data[0];
+	__fp16 v_min = v_fp16_data[0], v_max = v_fp16_data[0];
+	
+	for (int i = 1; i < B * H * R * D; i++) {
+		int8_t q_val = q_int8_data[i];
+		int8_t k_val = k_int8_data[i];
+		__fp16 v_val = v_fp16_data[i];
+		
+		if (q_val < q_min) q_min = q_val;
+		if (q_val > q_max) q_max = q_val;
+		if (k_val < k_min) k_min = k_val;
+		if (k_val > k_max) k_max = k_val;
+		if (v_val < v_min) v_min = v_val;
+		if (v_val > v_max) v_max = v_val;
+	}
+	
+	printf("Q_int8 data range: [%d, %d]\n", q_min, q_max);
+	printf("K_int8 data range: [%d, %d]\n", k_min, k_max);
+	printf("V data range: [%.4f, %.4f]\n", (float)v_min, (float)v_max);
+	
+	// 2. Allocate GPU memory for kernel inputs (exactly as PyTorch does)
+	void* gpu_q_int8; cudaMalloc(&gpu_q_int8, B * H * R * D * sizeof(int8_t));
+	void* gpu_k_int8; cudaMalloc(&gpu_k_int8, B * H * C * D * sizeof(int8_t));
+	void* gpu_v_fp16; cudaMalloc(&gpu_v_fp16, B * H * C * D * sizeof(__fp16));
+	void* gpu_q_scales; cudaMalloc(&gpu_q_scales, B * H * 4 * sizeof(float));
+	void* gpu_k_scales; cudaMalloc(&gpu_k_scales, B * H * 1 * sizeof(float));
+	void* gpu_output; cudaMalloc(&gpu_output, B * H * R * D * sizeof(__fp16));
+	
+	// Copy data to GPU
+	cudaMemcpy(gpu_q_int8, q_int8_data, B * H * R * D * sizeof(int8_t), cudaMemcpyHostToDevice);
+	cudaMemcpy(gpu_k_int8, k_int8_data, B * H * C * D * sizeof(int8_t), cudaMemcpyHostToDevice);
+	cudaMemcpy(gpu_v_fp16, v_fp16_data, B * H * C * D * sizeof(__fp16), cudaMemcpyHostToDevice);
+	cudaMemcpy(gpu_q_scales, q_scales_data, B * H * 4 * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(gpu_k_scales, k_scales_data, B * H * 1 * sizeof(float), cudaMemcpyHostToDevice);
+	
+	printf("✅ Copied data to GPU\n");
+	
+	// 3. Launch the exact same kernel that PyTorch uses
+	// PyTorch uses: CTA_Q=128, CTA_K=64, WARP_Q=32, WARP_K=64, head_dim=128
+	// Now using PyTorch's exact template instantiation with added WARP_K=64 kernel
+	printf("Calling raw SageAttention kernel with PyTorch template parameters...\n");
+	printf("Template params: CTA_Q=128, CTA_K=64, WARP_Q=32, WARP_K=64, head_dim=128\n");
+	
+	// Set up kernel launch parameters (exactly as PyTorch does)
+	int grid_x = 1, grid_y = H, grid_z = B;  // PyTorch: (ceil(R/CTA_Q), H, B) = (ceil(64/128), 8, 1) = (1, 8, 1)
+	int block_size = 128;                     // PyTorch: (32, 4) = 128 threads (not 512!)
+	
+	printf("Grid: (%d, %d, %d), Block: (%d)\n", grid_x, grid_y, grid_z, block_size);
+	
+	// Direct kernel call - use the compiled kernel from the object file
+	// The kernel template <128, 64, 32, 16, 128, kPerWarp, kPerBlock> should be available in the linked library
+	printf("Calling raw SageAttention kernel directly (bypassing CCV wrapper)...\n");
+	
+	// Call the raw SageAttention kernel directly with PyTorch's quantized inputs
+	extern void call_sage_attention_kernel_direct(
+		int8_t *Q, int8_t *K, __fp16 *V, __fp16 *O, float *Lse,
+		float *Q_scale, float *K_scale, __fp16 *V_mean,
+		uint32_t qo_len, uint32_t kv_len, uint32_t num_kv_groups,
+		uint32_t stride_bz_q, uint32_t stride_seq_q, uint32_t stride_h_q,
+		uint32_t stride_bz_k, uint32_t stride_seq_k, uint32_t stride_h_k,
+		uint32_t stride_bz_v, uint32_t stride_seq_v, uint32_t stride_h_v,
+		uint32_t stride_bz_o, uint32_t stride_seq_o, uint32_t stride_h_o,
+		float sm_scale, int grid_x, int grid_y, int grid_z, int block_size);
+	
+	// Set up kernel parameters exactly as PyTorch does
+	// PyTorch uses HND layout: (batch, head, seq, dim) 
+	// PyTorch strides: bz=65536, h=8192, seq=128, dim=1
+	uint32_t qo_len = R, kv_len = C, num_kv_groups = 1;
+	uint32_t stride_bz_q = H * R * D, stride_seq_q = R * D, stride_h_q = D;     // Original: HND layout
+	uint32_t stride_bz_k = H * C * D, stride_seq_k = C * D, stride_h_k = D;     // Original: HND layout  
+	uint32_t stride_bz_v = H * C * D, stride_seq_v = C * D, stride_h_v = D;     // Original: HND layout
+	uint32_t stride_bz_o = H * R * D, stride_seq_o = R * D, stride_h_o = D;     // Original: HND layout
+	
+	// Grid and block dimensions (will pass as integers to wrapper)
+	
+	printf("Raw kernel parameters:\n");
+	printf("  qo_len=%d, kv_len=%d, num_kv_groups=%d\n", qo_len, kv_len, num_kv_groups);
+	printf("  Q strides: bz=%d, seq=%d, h=%d\n", stride_bz_q, stride_seq_q, stride_h_q);
+	printf("  K strides: bz=%d, seq=%d, h=%d\n", stride_bz_k, stride_seq_k, stride_h_k);
+	printf("  Scale: %f\n", sm_scale);
+	printf("CORRECTED for HND layout (kernel expects): Q strides: bz=%d, h=%d, seq=%d\n", 
+		stride_bz_q, stride_h_q, stride_seq_q);
+	printf("CORRECTED for HND layout (kernel expects): K strides: bz=%d, h=%d, seq=%d\n", 
+		stride_bz_k, stride_h_k, stride_seq_k);
+	
+	// Remove fp16 loading for Q and K - we already have int8 data
+	
+	
+	call_sage_attention_kernel_direct(
+		(int8_t*)gpu_q_int8, (int8_t*)gpu_k_int8, (__fp16*)gpu_v_fp16, (__fp16*)gpu_output, NULL,
+		(float*)gpu_q_scales, (float*)gpu_k_scales, NULL,
+		qo_len, kv_len, num_kv_groups,
+		stride_bz_q, stride_h_q, stride_seq_q,  // HND: batch, head, seq, dim
+		stride_bz_k, stride_h_k, stride_seq_k,  // HND: batch, head, seq, dim
+		stride_bz_v, stride_h_v, stride_seq_v,  // HND: batch, head, seq, dim
+		stride_bz_o, stride_h_o, stride_seq_o,  // HND: batch, head, seq, dim
+		sm_scale, grid_x, grid_y, grid_z, block_size);
+	
+	printf("Raw kernel call completed, checking for errors...\n");
+	
+	cudaError_t error = cudaGetLastError();
+	if (error != cudaSuccess) {
+		printf("❌ Kernel launch failed: %s\n", cudaGetErrorString(error));
+	} else {
+		cudaDeviceSynchronize();
+		error = cudaGetLastError();
+		if (error != cudaSuccess) {
+			printf("❌ Kernel execution failed: %s\n", cudaGetErrorString(error));
+		} else {
+			printf("✅ Raw kernel completed successfully\n");
+			
+			// 4. Copy output back and save for comparison
+			__fp16* output_data = (__fp16*)malloc(B * H * R * D * sizeof(__fp16));
+			cudaMemcpy(output_data, gpu_output, B * H * R * D * sizeof(__fp16), cudaMemcpyDeviceToHost);
+			
+			printf("\n=== CCV Raw Kernel Output Analysis ===\n");
+			printf("Output tensor shape: [B=%d, H=%d, R=%d, D=%d] = [%d, %d, %d, %d]\n", B, H, R, D, B, H, R, D);
+			printf("First 10 output values:\n");
+			for (int i = 0; i < 10; i++) {
+				printf("  output[%d]: %f\n", i, (float)output_data[i]);
+			}
+			
+			printf("\nSample outputs from different positions:\n");
+			printf("  output[0,0,0,0]: %f\n", (float)output_data[0]);                           // [0,0,0,0]
+			printf("  output[0,0,0,64]: %f\n", (float)output_data[64]);                         // [0,0,0,64] - mid head_dim
+			printf("  output[0,0,0,127]: %f\n", (float)output_data[127]);                       // [0,0,0,127] - end head_dim
+			printf("  output[0,0,32,0]: %f\n", (float)output_data[32 * D]);                     // [0,0,32,0] - mid sequence
+			printf("  output[0,4,0,0]: %f\n", (float)output_data[4 * R * D]);                  // [0,4,0,0] - mid head
+			
+			// Save CCV output for comparison with PyTorch
+			f = fopen("/tmp/ccv_sage_kernel_output.bin", "wb");
+			fwrite(output_data, sizeof(__fp16), B * H * R * D, f);
+			fclose(f);
+			printf("✅ Saved CCV raw kernel output to /tmp/ccv_sage_kernel_output.bin\n");
+			
+			// Load and compare with PyTorch output if available
+			FILE* pytorch_file = fopen("/tmp/pytorch_sage_kernel_output.bin", "rb");
+			if (pytorch_file) {
+				__fp16* pytorch_data = (__fp16*)malloc(B * H * R * D * sizeof(__fp16));
+				fread(pytorch_data, sizeof(__fp16), B * H * R * D, pytorch_file);
+				fclose(pytorch_file);
+				
+				printf("\n=== CCV vs PyTorch Kernel Comparison ===\n");
+				printf("Comparing first 10 values:\n");
+				int exact_matches = 0;
+				double max_diff = 0.0;
+				double sum_diff = 0.0;
+				
+				for (int i = 0; i < 10; i++) {
+					float ccv_val = (float)output_data[i];
+					float pytorch_val = (float)pytorch_data[i];
+					double diff = fabs(ccv_val - pytorch_val);
+					sum_diff += diff;
+					if (diff > max_diff) max_diff = diff;
+					if (diff < 1e-6) exact_matches++;
+					
+					printf("  [%d] CCV: %f, PyTorch: %f, diff: %.8f\n", i, ccv_val, pytorch_val, diff);
+				}
+				
+				printf("\nKey position comparisons:\n");
+				printf("  [0,0,0,0] CCV: %f, PyTorch: %f, diff: %.8f\n", 
+					(float)output_data[0], (float)pytorch_data[0], 
+					fabs((float)output_data[0] - (float)pytorch_data[0]));
+				printf("  [0,0,0,64] CCV: %f, PyTorch: %f, diff: %.8f\n", 
+					(float)output_data[64], (float)pytorch_data[64], 
+					fabs((float)output_data[64] - (float)pytorch_data[64]));
+				printf("  [0,4,0,0] CCV: %f, PyTorch: %f, diff: %.8f\n", 
+					(float)output_data[4 * R * D], (float)pytorch_data[4 * R * D], 
+					fabs((float)output_data[4 * R * D] - (float)pytorch_data[4 * R * D]));
+				
+				printf("\nStatistics (first 10 values):\n");
+				printf("  Exact matches (diff < 1e-6): %d/10\n", exact_matches);
+				printf("  Maximum difference: %.8f\n", max_diff);
+				printf("  Average difference: %.8f\n", sum_diff / 10.0);
+				
+				// Full tensor comparison
+				int total_exact = 0;
+				double total_max_diff = 0.0;
+				double total_sum_diff = 0.0;
+				int total_elements = B * H * R * D;
+				
+				for (int i = 0; i < total_elements; i++) {
+					double diff = fabs((float)output_data[i] - (float)pytorch_data[i]);
+					total_sum_diff += diff;
+					if (diff > total_max_diff) total_max_diff = diff;
+					if (diff < 1e-6) total_exact++;
+				}
+				
+				printf("\nFull tensor comparison (%d elements):\n", total_elements);
+				printf("  Exact matches (diff < 1e-6): %d/%d (%.2f%%)\n", 
+					total_exact, total_elements, (100.0 * total_exact) / total_elements);
+				printf("  Maximum difference: %.8f\n", total_max_diff);
+				printf("  Average difference: %.8f\n", total_sum_diff / total_elements);
+				
+				if (total_max_diff < 1e-5) {
+					printf("🎯 EXCELLENT: CCV and PyTorch outputs are virtually identical!\n");
+				} else if (total_max_diff < 1e-3) {
+					printf("✅ GOOD: CCV and PyTorch outputs are very close (within expected FP16 precision)\n");
+				} else {
+					printf("⚠️  MISMATCH: Significant differences detected between CCV and PyTorch\n");
+				}
+				
+				free(pytorch_data);
+			} else {
+				printf("PyTorch output not found. Run: python3 test_sageattention_sm80_direct.py\n");
+			}
+			
+			free(output_data);
+		}
+	}
+	
+	// Cleanup
+	free(q_int8_data); free(k_int8_data); free(v_fp16_data); 
+	free(q_scales_data); free(k_scales_data);
+	cudaFree(gpu_q_int8); cudaFree(gpu_k_int8); cudaFree(gpu_v_fp16);
+	cudaFree(gpu_q_scales); cudaFree(gpu_k_scales); cudaFree(gpu_output);
+	
+	REQUIRE(error == cudaSuccess, "Raw SageAttention kernel should execute successfully");
+}
+
+TEST_CASE("ccv_nnc_qk_int8_sv_f16_accum_f32_attn test")
+{
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+		ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD, CCV_NNC_BACKEND_GPU_REF));
+	
+	printf("\n=== CCV SageAttention Wrapper Test ===\n");
+	printf("Testing ccv_nnc_qk_int8_sv_f16_accum_f32_attn wrapper function\n");
+	printf("This test validates the CCV wrapper using same inputs as 'sage kernel test'\n");
+	
+	// Use same test parameters as "sage kernel test"
+	int B = 1, R = 64, C = 64, H = 8, D = 128;
+	float sm_scale = 1.0f / sqrtf((float)D);  // 0.088388
+	
+	printf("Test dimensions: B=%d, R=%d, C=%d, H=%d, D=%d\n", B, R, C, H, D);
+	printf("Scale: %f\n", sm_scale);
+	
+	// Load same PyTorch quantized inputs as "sage kernel test"
+	printf("Loading PyTorch quantized inputs: B=%d, R=%d, C=%d, H=%d, D=%d\n", B, R, C, H, D);
+	
+	// Allocate host memory for input data (same as sage kernel test)
+	int8_t* q_int8_data = (int8_t*)malloc(B * H * R * D * sizeof(int8_t));
+	int8_t* k_int8_data = (int8_t*)malloc(B * H * C * D * sizeof(int8_t)); 
+	__fp16* v_fp16_data = (__fp16*)malloc(B * H * C * D * sizeof(__fp16));
+	float* q_scales_data = (float*)malloc(B * H * 4 * sizeof(float));  // per-warp scales
+	float* k_scales_data = (float*)malloc(B * H * 1 * sizeof(float));  // per-block scales
+	
+	// Load quantized data from PyTorch files (exact same as sage kernel test)
+	FILE* f;
+	f = fopen("/tmp/pytorch_kernel_q_int8.bin", "rb");
+	REQUIRE(f != NULL, "Failed to open Q int8 data file");
+	fread(q_int8_data, sizeof(int8_t), B * H * R * D, f);
+	fclose(f);
+	
+	f = fopen("/tmp/pytorch_kernel_k_int8.bin", "rb");
+	REQUIRE(f != NULL, "Failed to open K int8 data file");
+	fread(k_int8_data, sizeof(int8_t), B * H * C * D, f);
+	fclose(f);
+	
+	f = fopen("/tmp/pytorch_kernel_v_fp16.bin", "rb");
+	REQUIRE(f != NULL, "Failed to open V fp16 data file");
+	fread(v_fp16_data, sizeof(__fp16), B * H * C * D, f);
+	fclose(f);
+	
+	f = fopen("/tmp/pytorch_kernel_q_scales.bin", "rb");
+	REQUIRE(f != NULL, "Failed to open Q scales data file");
+	fread(q_scales_data, sizeof(float), B * H * 4, f);
+	fclose(f);
+	
+	f = fopen("/tmp/pytorch_kernel_k_scales.bin", "rb");
+	REQUIRE(f != NULL, "Failed to open K scales data file");
+	fread(k_scales_data, sizeof(float), B * H * 1, f);
+	fclose(f);
+	
+	printf("✅ Loaded PyTorch quantized data from disk\n");
+	
+	// Print sample values for verification (same as sage kernel test)
+	printf("Sample values: Q_int8[0]=%d, K_int8[0]=%d, V[0]=%f\n", 
+		q_int8_data[0], k_int8_data[0], (float)v_fp16_data[0]);
+	printf("Sample scales: Q_scale[0]=%f, K_scale[0]=%f\n", 
+		q_scales_data[0], k_scales_data[0]);
+	
+	// Create CCV tensors for the wrapper function  
+	// Use HND layout to match working direct test: [batch, heads, seq, dim]
+	// Query: [B, H, R, D], Key/Value: [B, H, C, D], Output: [B, H, R, D]
+	// Note: Using CCV_8U for int8 data, will cast to int8_t* in wrapper
+	ccv_nnc_tensor_t* q_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, H, R, D), 0);
+	ccv_nnc_tensor_t* k_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, H, C, D), 0);
+	ccv_nnc_tensor_t* v_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* o_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, R, D), 0);
+	ccv_nnc_tensor_t* q_scale_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, 4), 0);
+	ccv_nnc_tensor_t* k_scale_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, 1), 0);
+	
+	// Copy data to CCV tensors
+	memcpy(q_tensor->data.u8, q_int8_data, B * H * R * D * sizeof(int8_t));
+	memcpy(k_tensor->data.u8, k_int8_data, B * H * C * D * sizeof(int8_t));
+	memcpy(v_tensor->data.u8, v_fp16_data, B * H * C * D * sizeof(__fp16));
+	memcpy(q_scale_tensor->data.u8, q_scales_data, B * H * 4 * sizeof(float));
+	memcpy(k_scale_tensor->data.u8, k_scales_data, B * H * 1 * sizeof(float));
+	
+	printf("✅ Created CCV tensors and copied input data\n");
+	
+	// Move tensors to GPU (HND layout)
+	ccv_nnc_tensor_t* gpu_q_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, H, R, D), 0);
+	ccv_nnc_tensor_t* gpu_k_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, H, C, D), 0);
+	ccv_nnc_tensor_t* gpu_v_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* gpu_o_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, R, D), 0);
+	ccv_nnc_tensor_t* gpu_q_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, 4), 0);
+	ccv_nnc_tensor_t* gpu_k_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, 1), 0);
+	
+	// Copy data to GPU tensors
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor), TENSOR_LIST(gpu_q_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(k_tensor), TENSOR_LIST(gpu_k_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(v_tensor), TENSOR_LIST(gpu_v_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_scale_tensor), TENSOR_LIST(gpu_q_scale_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(k_scale_tensor), TENSOR_LIST(gpu_k_scale_tensor), 0);
+	
+	printf("✅ Copied tensors to GPU\n");
+	
+	// Declare wrapper function (should be in header but adding here for test)
+	extern int ccv_nnc_qk_int8_sv_f16_accum_f32_attn(
+		ccv_nnc_tensor_t* const query,
+		ccv_nnc_tensor_t* const key,
+		ccv_nnc_tensor_t* const value,
+		ccv_nnc_tensor_t* const output,
+		ccv_nnc_tensor_t* const query_scale,
+		ccv_nnc_tensor_t* const key_scale,
+		int tensor_layout,
+		int is_causal,
+		int qk_quant_gran,
+		float sm_scale,
+		int return_lse);
+	
+	// Call the CCV wrapper function
+	printf("\n=== Calling CCV SageAttention Wrapper ===\n");
+	printf("Wrapper parameters:\n");
+	printf("  tensor_layout: 1 (HND - matching direct test)\n");
+	printf("  is_causal: 0 (false)\n");
+	printf("  qk_quant_gran: 2 (per_warp)\n");
+	printf("  sm_scale: %f\n", sm_scale);
+	printf("  return_lse: 0 (false)\n");
+	
+	int result = ccv_nnc_qk_int8_sv_f16_accum_f32_attn(
+		gpu_q_tensor,        // query (int8)
+		gpu_k_tensor,        // key (int8)
+		gpu_v_tensor,        // value (fp16)
+		gpu_o_tensor,        // output (fp16) - modified in-place
+		gpu_q_scale_tensor,  // query_scale (fp32)
+		gpu_k_scale_tensor,  // key_scale (fp32)
+		1,                   // tensor_layout: 1=HND (matching direct test)
+		0,                   // is_causal: false
+		2,                   // qk_quant_gran: 2=per_warp
+		sm_scale,            // sm_scale
+		0                    // return_lse: false
+	);
+	
+	printf("CCV wrapper result: %s\n", result == 0 ? "SUCCESS" : "FAILED");
+	REQUIRE(result == 0, "CCV SageAttention wrapper should succeed");
+	
+	// Copy output back to CPU for comparison  
+	ccv_nnc_tensor_t* cpu_output_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, R, D), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_o_tensor), TENSOR_LIST(cpu_output_tensor), 0);
+	
+	printf("✅ Copied output back to CPU\n");
+	
+	// Extract output data for comparison
+	__fp16* ccv_output_data = (__fp16*)cpu_output_tensor->data.u8;
+	
+	printf("\n=== CCV Wrapper Output Analysis ===\n");
+	printf("Output tensor shape: [B=%d, H=%d, R=%d, D=%d] (HND layout)\n", B, H, R, D);
+	printf("First 10 output values:\n");
+	for (int i = 0; i < 10; i++) {
+		printf("  output[%d]: %f\n", i, (float)ccv_output_data[i]);
+	}
+	
+	printf("Sample outputs from different positions:\n");
+	printf("  output[0,0,0,0]: %f\n", (float)ccv_output_data[0]);                           // [0,0,0,0]
+	printf("  output[0,0,0,64]: %f\n", (float)ccv_output_data[64]);                         // [0,0,0,64] - mid head_dim
+	printf("  output[0,0,0,127]: %f\n", (float)ccv_output_data[127]);                       // [0,0,0,127] - end head_dim 
+	printf("  output[0,0,32,0]: %f\n", (float)ccv_output_data[32 * D]);                     // [0,0,32,0] - mid sequence
+	printf("  output[0,4,0,0]: %f\n", (float)ccv_output_data[4 * R * D]);                  // [0,4,0,0] - mid head
+	
+	// Save CCV wrapper output for comparison
+	f = fopen("/tmp/ccv_wrapper_sage_output.bin", "wb");
+	if (f) {
+		fwrite(ccv_output_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		printf("✅ Saved CCV wrapper output to /tmp/ccv_wrapper_sage_output.bin\n");
+	}
+	
+	// Compare with PyTorch output (load from sage kernel test)
+	printf("\n=== CCV Wrapper vs PyTorch Comparison ===\n");
+	f = fopen("/tmp/pytorch_sage_kernel_output.bin", "rb");
+	if (f) {
+		__fp16* pytorch_data = (__fp16*)malloc(B * H * R * D * sizeof(__fp16));
+		fread(pytorch_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		
+		printf("Comparing first 10 values:\n");
+		for (int i = 0; i < 10; i++) {
+			float ccv_val = (float)ccv_output_data[i];
+			float pytorch_val = (float)pytorch_data[i];
+			float diff = fabsf(ccv_val - pytorch_val);
+			printf("  [%d] CCV: %f, PyTorch: %f, diff: %.8f\n", i, ccv_val, pytorch_val, diff);
+		}
+		
+		printf("\nKey position comparisons:\n");
+		printf("  [0,0,0,0] CCV: %f, PyTorch: %f, diff: %.8f\n", 
+			(float)ccv_output_data[0], (float)pytorch_data[0], 
+			fabsf((float)ccv_output_data[0] - (float)pytorch_data[0]));
+		printf("  [0,0,0,64] CCV: %f, PyTorch: %f, diff: %.8f\n", 
+			(float)ccv_output_data[64], (float)pytorch_data[64], 
+			fabsf((float)ccv_output_data[64] - (float)pytorch_data[64]));
+		printf("  [0,4,0,0] CCV: %f, PyTorch: %f, diff: %.8f\n", 
+			(float)ccv_output_data[4 * R * D], (float)pytorch_data[4 * R * D], 
+			fabsf((float)ccv_output_data[4 * R * D] - (float)pytorch_data[4 * R * D]));
+		
+		// Full tensor comparison
+		int exact_matches = 0;
+		double max_diff = 0.0, sum_diff = 0.0;
+		int total_elements = B * H * R * D;
+		
+		for (int i = 0; i < total_elements; i++) {
+			double diff = fabs((float)ccv_output_data[i] - (float)pytorch_data[i]);
+			sum_diff += diff;
+			if (diff > max_diff) max_diff = diff;
+			if (diff < 1e-6) exact_matches++;
+		}
+		
+		printf("\nStatistics (first 10 values):\n");
+		printf("  Exact matches (diff < 1e-6): %d/10\n", exact_matches >= 10 ? 10 : exact_matches);
+		printf("  Maximum difference: %.8f\n", max_diff);
+		printf("  Average difference: %.8f\n", sum_diff / 10);
+		
+		printf("\nFull tensor comparison (%d elements):\n", total_elements);
+		printf("  Exact matches (diff < 1e-6): %d/%d (%.2f%%)\n", 
+			exact_matches, total_elements, (100.0 * exact_matches) / total_elements);
+		printf("  Maximum difference: %.8f\n", max_diff);
+		printf("  Average difference: %.8f\n", sum_diff / total_elements);
+		
+		if (max_diff < 1e-5) {
+			printf("🎯 EXCELLENT: CCV wrapper and PyTorch outputs are virtually identical!\n");
+		} else if (max_diff < 1e-3) {
+			printf("✅ GOOD: CCV wrapper and PyTorch outputs are very close (within expected FP16 precision)\n");
+		} else {
+			printf("⚠️  MISMATCH: Significant differences detected between CCV wrapper and PyTorch\n");
+		}
+		
+		free(pytorch_data);
+	} else {
+		printf("PyTorch output not found. Run 'sage kernel test' first to generate reference output.\n");
+	}
+	
+	// Cleanup
+	ccv_nnc_tensor_free(q_tensor);
+	ccv_nnc_tensor_free(k_tensor);
+	ccv_nnc_tensor_free(v_tensor);
+	ccv_nnc_tensor_free(o_tensor);
+	ccv_nnc_tensor_free(q_scale_tensor);
+	ccv_nnc_tensor_free(k_scale_tensor);
+	ccv_nnc_tensor_free(gpu_q_tensor);
+	ccv_nnc_tensor_free(gpu_k_tensor);
+	ccv_nnc_tensor_free(gpu_v_tensor);
+	ccv_nnc_tensor_free(gpu_o_tensor);
+	ccv_nnc_tensor_free(gpu_q_scale_tensor);
+	ccv_nnc_tensor_free(gpu_k_scale_tensor);
+	ccv_nnc_tensor_free(cpu_output_tensor);
+	
+	free(q_int8_data); free(k_int8_data); free(v_fp16_data);
+	free(q_scales_data); free(k_scales_data);
+	
+	printf("✅ CCV SageAttention wrapper test completed successfully!\n");
+}
+
+
+TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp16_cuda test")
+{
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+		ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD, CCV_NNC_BACKEND_GPU_REF));
+	
+	printf("\n=== CCV SageAttention Wrapper Test ===\n");
+	printf("Testing ccv_nnc_sageattn_qk_int8_pv_fp16_cuda wrapper function\n");
+	printf("This test validates the CCV wrapper using same inputs as 'sage kernel test'\n");
+	
+	// Use same test parameters as "sage kernel test"
+	int B = 1, R = 64, C = 64, H = 8, D = 128;
+	float sm_scale = 1.0f / sqrtf((float)D);  // 0.088388
+	
+	printf("Test dimensions: B=%d, R=%d, C=%d, H=%d, D=%d\n", B, R, C, H, D);
+	printf("Scale: %f\n", sm_scale);
+	
+	// Load FP16 input data from PyTorch files
+	printf("Loading PyTorch FP16 inputs: B=%d, R=%d, C=%d, H=%d, D=%d\n", B, R, C, H, D);
+	
+	// Allocate host memory for FP16 input data
+	__fp16* q_fp16_data = (__fp16*)malloc(B * H * R * D * sizeof(__fp16));
+	__fp16* k_fp16_data = (__fp16*)malloc(B * H * C * D * sizeof(__fp16));
+	__fp16* v_fp16_data = (__fp16*)malloc(B * H * C * D * sizeof(__fp16));
+	
+	// Load FP16 data from PyTorch files
+	FILE* f;
+	f = fopen("/tmp/pytorch_kernel_q_fp16.bin", "rb");
+	if (f) {
+		fread(q_fp16_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		printf("✅ Loaded Q FP16 data from disk\n");
+	} else {
+		// If FP16 files don't exist, load FP32 and convert
+		printf("FP16 files not found, loading FP32 and converting...\n");
+		float* q_fp32_data = (float*)malloc(B * H * R * D * sizeof(float));
+		f = fopen("/tmp/pytorch_q_input.bin", "rb");
+		if (f) {
+			fread(q_fp32_data, sizeof(float), B * H * R * D, f);
+			fclose(f);
+			// Convert FP32 to FP16
+			for (int i = 0; i < B * H * R * D; i++) {
+				q_fp16_data[i] = (__fp16)q_fp32_data[i];
+			}
+			printf("✅ Loaded and converted Q data from FP32\n");
+		}
+		free(q_fp32_data);
+	}
+	
+	f = fopen("/tmp/pytorch_kernel_k_fp16.bin", "rb");
+	if (f) {
+		fread(k_fp16_data, sizeof(__fp16), B * H * C * D, f);
+		fclose(f);
+		printf("✅ Loaded K FP16 data from disk\n");
+	} else {
+		// If FP16 files don't exist, load FP32 and convert
+		float* k_fp32_data = (float*)malloc(B * H * C * D * sizeof(float));
+		f = fopen("/tmp/pytorch_k_input.bin", "rb");
+		if (f) {
+			fread(k_fp32_data, sizeof(float), B * H * C * D, f);
+			fclose(f);
+			// Convert FP32 to FP16
+			for (int i = 0; i < B * H * C * D; i++) {
+				k_fp16_data[i] = (__fp16)k_fp32_data[i];
+			}
+			printf("✅ Loaded and converted K data from FP32\n");
+		}
+		free(k_fp32_data);
+	}
+	
+	f = fopen("/tmp/pytorch_kernel_v_fp16.bin", "rb");
+	if (f) {
+		fread(v_fp16_data, sizeof(__fp16), B * H * C * D, f);
+		fclose(f);
+		printf("✅ Loaded V FP16 data from disk\n");
+	} else {
+		// If FP16 files don't exist, load FP32 and convert
+		float* v_fp32_data = (float*)malloc(B * H * C * D * sizeof(float));
+		f = fopen("/tmp/pytorch_v_input.bin", "rb");
+		if (f) {
+			fread(v_fp32_data, sizeof(float), B * H * C * D, f);
+			fclose(f);
+			// Convert FP32 to FP16
+			for (int i = 0; i < B * H * C * D; i++) {
+				v_fp16_data[i] = (__fp16)v_fp32_data[i];
+			}
+			printf("✅ Loaded and converted V data from FP32\n");
+		}
+		free(v_fp32_data);
+	}
+	
+	// Print sample values for verification
+	printf("Sample values: Q[0]=%f, K[0]=%f, V[0]=%f\n", 
+		(float)q_fp16_data[0], (float)k_fp16_data[0], (float)v_fp16_data[0]);
+	
+	// Create CCV tensors for the wrapper function  
+	// Use HND layout to match working direct test: [batch, heads, seq, dim]
+	// Query: [B, H, R, D], Key/Value: [B, H, C, D], Output: [B, H, R, D]
+	// IMPORTANT: Use 16F for input Q and K (they will be quantized internally)
+	ccv_nnc_tensor_t* q_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, R, D), 0);
+	ccv_nnc_tensor_t* k_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* v_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* o_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, R, D), 0);
+	
+	// Copy data to CCV tensors
+	memcpy(q_tensor->data.f16, q_fp16_data, B * H * R * D * sizeof(__fp16));
+	memcpy(k_tensor->data.f16, k_fp16_data, B * H * C * D * sizeof(__fp16));
+	memcpy(v_tensor->data.f16, v_fp16_data, B * H * C * D * sizeof(__fp16));
+	
+	printf("✅ Created CCV tensors and copied input data\n");
+	
+	// Move tensors to GPU (HND layout)
+	ccv_nnc_tensor_t* gpu_q_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, R, D), 0);
+	ccv_nnc_tensor_t* gpu_k_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* gpu_v_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* gpu_o_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, R, D), 0);
+	
+	// Copy data to GPU tensors
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor), TENSOR_LIST(gpu_q_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(k_tensor), TENSOR_LIST(gpu_k_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(v_tensor), TENSOR_LIST(gpu_v_tensor), 0);
+	
+	printf("✅ Copied tensors to GPU\n");
+	
+	// Create scale tensors based on quantization parameters
+	const uint32_t BLKQ = 128;
+	const uint32_t WARPQ = 32;
+	const uint32_t BLKK = 64;
+	const size_t q_blocks = (R + BLKQ - 1) / BLKQ;
+	const size_t warps_per_block = BLKQ / WARPQ;
+	const int q_scale_blocks = q_blocks * warps_per_block;  // Should be 4
+	const int k_scale_blocks = (C + BLKK - 1) / BLKK;      // Should be 1
+	
+	printf("Scale tensor dimensions: q_scale_blocks=%d, k_scale_blocks=%d\n", q_scale_blocks, k_scale_blocks);
+	
+	ccv_nnc_tensor_t* q_scale_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* k_scale_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, k_scale_blocks), 0);
+	
+	// Initialize scales to 1.0 (will be computed by the function)
+	for (int i = 0; i < B * H * q_scale_blocks; i++) {
+		q_scale_tensor->data.f32[i] = 1.0f;
+	}
+	for (int i = 0; i < B * H * k_scale_blocks; i++) {
+		k_scale_tensor->data.f32[i] = 1.0f;
+	}
+	
+	ccv_nnc_tensor_t* gpu_q_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* gpu_k_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, k_scale_blocks), 0);
+	
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_scale_tensor), TENSOR_LIST(gpu_q_scale_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(k_scale_tensor), TENSOR_LIST(gpu_k_scale_tensor), 0);
+	
+	// Declare wrapper function (should be in header but adding here for test)
+	extern int ccv_nnc_sageattn_qk_int8_pv_fp16_cuda(
+		ccv_nnc_tensor_t* const query,
+		ccv_nnc_tensor_t* const key,
+		ccv_nnc_tensor_t* const k_mean,
+		ccv_nnc_tensor_t* const value,
+		ccv_nnc_tensor_t* const q_int8,  // Output Q quantized (INT8)
+		ccv_nnc_tensor_t* const k_int8,  // Output K quantized (INT8)
+		ccv_nnc_tensor_t* const query_scale,
+		ccv_nnc_tensor_t* const key_scale,
+		ccv_nnc_tensor_t* const output,
+		int tensor_layout, // 0 NHD, 1 HND 
+		int is_causal, // default false
+		int qk_quant_gran, // only support per_warp
+		float sm_scale, // default // 0.088388
+		int return_lse, // default false
+		int pv_accum_dtype, // default fp32, 
+		int BLKQ,                        // Block size for Q (default 128)
+		int WARPQ,                       // Warp size for Q (default 32)
+		int BLKK,                        // Block size for K (default 64)
+		ccv_nnc_stream_context_t* const stream_context
+	);
+	
+	// Call the CCV wrapper function
+	printf("\n=== Calling CCV SageAttention Wrapper ===\n");
+	printf("Wrapper parameters:\n");
+	printf("  tensor_layout: 1 (HND - matching direct test)\n");
+	printf("  is_causal: 0 (false)\n");
+	printf("  qk_quant_gran: 2 (per_warp)\n");
+	printf("  sm_scale: %f\n", sm_scale);
+	printf("  return_lse: 0 (false)\n");
+	printf("  BLKQ: %d, WARPQ: %d, BLKK: %d\n", BLKQ, WARPQ, BLKK);
+	
+	// Create output tensors for quantized Q and K
+	ccv_nnc_tensor_t* gpu_q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, H, R, D), 0);
+	ccv_nnc_tensor_t* gpu_k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, H, C, D), 0);
+	
+	// Create k_mean tensor (required for SageAttention)
+	ccv_nnc_tensor_t* k_mean_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, D), 0);
+	ccv_nnc_tensor_t* gpu_k_mean_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, D), 0);
+	
+	// Initialize k_mean to zeros (typical initialization)
+	memset(k_mean_tensor->data.u8, 0, B * H * D * sizeof(__fp16));
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(k_mean_tensor), TENSOR_LIST(gpu_k_mean_tensor), 0);
+	
+	int result = ccv_nnc_sageattn_qk_int8_pv_fp16_cuda(
+		gpu_q_tensor,        // query (fp16 input)
+		gpu_k_tensor,        // key (fp16 input)
+		gpu_k_mean_tensor,   // k_mean (fp16)
+		gpu_v_tensor,        // value (fp16)
+		gpu_q_int8_tensor,   // q_int8 (output quantized Q)
+		gpu_k_int8_tensor,   // k_int8 (output quantized K)
+		gpu_q_scale_tensor,  // query_scale (fp32)
+		gpu_k_scale_tensor,  // key_scale (fp32)
+		gpu_o_tensor,        // output (fp16)
+		1,                   // tensor_layout: 1=HND
+		0,                   // is_causal: false
+		2,                   // qk_quant_gran: 2=per_warp
+		sm_scale,            // sm_scale
+		0,                   // return_lse: false
+		2,                   // pv_accum_dtype: 2=fp32
+		BLKQ,                // BLKQ
+		WARPQ,               // WARPQ
+		BLKK,                // BLKK
+		0                    // stream_context (NULL for default)
+	);
+	
+	printf("CCV wrapper result: %s\n", result == 0 ? "SUCCESS" : "FAILED");
+	REQUIRE(result == 0, "CCV SageAttention wrapper should succeed");
+	
+	// Copy output back to CPU for comparison  
+	ccv_nnc_tensor_t* cpu_output_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, R, D), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_o_tensor), TENSOR_LIST(cpu_output_tensor), 0);
+	
+	// Also copy the quantized outputs and scales back for verification
+	ccv_nnc_tensor_t* cpu_q_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, H, R, D), 0);
+	ccv_nnc_tensor_t* cpu_k_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, H, C, D), 0);
+	ccv_nnc_tensor_t* cpu_q_scale_output = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* cpu_k_scale_output = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, k_scale_blocks), 0);
+	
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_q_int8_tensor), TENSOR_LIST(cpu_q_int8_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_k_int8_tensor), TENSOR_LIST(cpu_k_int8_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_q_scale_tensor), TENSOR_LIST(cpu_q_scale_output), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_k_scale_tensor), TENSOR_LIST(cpu_k_scale_output), 0);
+	
+	printf("✅ Copied outputs back to CPU\n");
+	
+	// Extract output data for comparison
+	__fp16* ccv_output_data = (__fp16*)cpu_output_tensor->data.u8;
+	int8_t* q_int8_output = (int8_t*)cpu_q_int8_tensor->data.u8;
+	int8_t* k_int8_output = (int8_t*)cpu_k_int8_tensor->data.u8;
+	
+	printf("\n=== CCV Wrapper Output Analysis ===\n");
+	printf("Output tensor shape: [B=%d, H=%d, R=%d, D=%d] (HND layout)\n", B, H, R, D);
+	printf("First 10 output values:\n");
+	for (int i = 0; i < 10; i++) {
+		printf("  output[%d]: %f\n", i, (float)ccv_output_data[i]);
+	}
+	
+	printf("\nQuantized Q (first 10 values): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%d ", q_int8_output[i]);
+	}
+	printf("\n");
+	
+	printf("Q scales (all %d values): ", q_scale_blocks);
+	for (int i = 0; i < q_scale_blocks; i++) {
+		printf("%.6f ", cpu_q_scale_output->data.f32[i]);
+	}
+	printf("\n");
+	
+	printf("\nQuantized K (first 10 values): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%d ", k_int8_output[i]);
+	}
+	printf("\n");
+	
+	printf("K scales (all %d values): ", k_scale_blocks);
+	for (int i = 0; i < k_scale_blocks; i++) {
+		printf("%.6f ", cpu_k_scale_output->data.f32[i]);
+	}
+	printf("\n");
+	
+	printf("\nSample outputs from different positions:\n");
+	printf("  output[0,0,0,0]: %f\n", (float)ccv_output_data[0]);
+	printf("  output[0,0,0,64]: %f\n", (float)ccv_output_data[64]);
+	printf("  output[0,0,0,127]: %f\n", (float)ccv_output_data[127]);
+	printf("  output[0,0,32,0]: %f\n", (float)ccv_output_data[32 * D]);
+	printf("  output[0,4,0,0]: %f\n", (float)ccv_output_data[4 * R * D]);
+	
+	// Save CCV wrapper output for comparison
+	f = fopen("/tmp/ccv_wrapper_sage_output.bin", "wb");
+	if (f) {
+		fwrite(ccv_output_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		printf("✅ Saved CCV wrapper output to /tmp/ccv_wrapper_sage_output.bin\n");
+	}
+	
+	// Compare with PyTorch output if available
+	printf("\n=== CCV Wrapper vs PyTorch Comparison ===\n");
+	f = fopen("/tmp/pytorch_sage_kernel_output.bin", "rb");
+	if (f) {
+		__fp16* pytorch_data = (__fp16*)malloc(B * H * R * D * sizeof(__fp16));
+		fread(pytorch_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		
+		printf("Comparing first 10 values:\n");
+		for (int i = 0; i < 10; i++) {
+			float ccv_val = (float)ccv_output_data[i];
+			float pytorch_val = (float)pytorch_data[i];
+			float diff = fabsf(ccv_val - pytorch_val);
+			printf("  [%d] CCV: %f, PyTorch: %f, diff: %.8f\n", i, ccv_val, pytorch_val, diff);
+		}
+		
+		// Full tensor comparison
+		int exact_matches = 0;
+		double max_diff = 0.0, sum_diff = 0.0;
+		int total_elements = B * H * R * D;
+		
+		for (int i = 0; i < total_elements; i++) {
+			double diff = fabs((float)ccv_output_data[i] - (float)pytorch_data[i]);
+			sum_diff += diff;
+			if (diff > max_diff) max_diff = diff;
+			if (diff < 1e-6) exact_matches++;
+		}
+		
+		printf("\nFull tensor comparison (%d elements):\n", total_elements);
+		printf("  Exact matches (diff < 1e-6): %d/%d (%.2f%%)\n", 
+			exact_matches, total_elements, (100.0 * exact_matches) / total_elements);
+		printf("  Maximum difference: %.8f\n", max_diff);
+		printf("  Average difference: %.8f\n", sum_diff / total_elements);
+		
+		if (max_diff < 1e-5) {
+			printf("🎯 EXCELLENT: CCV wrapper and PyTorch outputs are virtually identical!\n");
+		} else if (max_diff < 1e-3) {
+			printf("✅ GOOD: CCV wrapper and PyTorch outputs are very close (within expected FP16 precision)\n");
+		} else {
+			printf("⚠️  WARNING: Larger differences detected between CCV wrapper and PyTorch\n");
+		}
+		
+		free(pytorch_data);
+	} else {
+		printf("PyTorch output not found at /tmp/pytorch_sage_output.bin\n");
+		printf("This is expected if you haven't run the PyTorch reference implementation.\n");
+	}
+	
+	// Cleanup
+	ccv_nnc_tensor_free(q_tensor);
+	ccv_nnc_tensor_free(k_tensor);
+	ccv_nnc_tensor_free(v_tensor);
+	ccv_nnc_tensor_free(o_tensor);
+	ccv_nnc_tensor_free(q_scale_tensor);
+	ccv_nnc_tensor_free(k_scale_tensor);
+	ccv_nnc_tensor_free(k_mean_tensor);
+	ccv_nnc_tensor_free(gpu_q_tensor);
+	ccv_nnc_tensor_free(gpu_k_tensor);
+	ccv_nnc_tensor_free(gpu_v_tensor);
+	ccv_nnc_tensor_free(gpu_o_tensor);
+	ccv_nnc_tensor_free(gpu_q_scale_tensor);
+	ccv_nnc_tensor_free(gpu_k_scale_tensor);
+	ccv_nnc_tensor_free(gpu_k_mean_tensor);
+	ccv_nnc_tensor_free(gpu_q_int8_tensor);
+	ccv_nnc_tensor_free(gpu_k_int8_tensor);
+	ccv_nnc_tensor_free(cpu_output_tensor);
+	ccv_nnc_tensor_free(cpu_q_int8_tensor);
+	ccv_nnc_tensor_free(cpu_k_int8_tensor);
+	ccv_nnc_tensor_free(cpu_q_scale_output);
+	ccv_nnc_tensor_free(cpu_k_scale_output);
+	
+	free(q_fp16_data);
+	free(k_fp16_data);
+	free(v_fp16_data);
+	
+	printf("✅ CCV SageAttention wrapper test completed successfully!\n");
+}
+
+TEST_CASE("_ccv_nnc_scaled_dot_product_attention_forw sage test")
+{
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+		ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD, CCV_NNC_BACKEND_GPU_REF));
+	
+	printf("\n=== SageAttention Forward Function Test ===\n");
+	printf("Testing _ccv_nnc_scaled_dot_product_attention_forw with SageAttention backend\n");
+	printf("Using same inputs as 'ccv_nnc_sageattn_qk_int8_pv_fp16_cuda test'\n");
+	
+	// Use same test parameters as SageAttention wrapper test
+	int B = 1, R = 64, C = 64, H = 8, D = 128;
+	float sm_scale = 1.0f / sqrtf((float)D);  // 0.088388
+	
+	printf("Test dimensions: B=%d, R=%d, C=%d, H=%d, D=%d\n", B, R, C, H, D);
+	printf("Scale: %f\n", sm_scale);
+	
+	// Load FP16 input data from PyTorch files
+	printf("Loading PyTorch FP16 inputs: B=%d, R=%d, C=%d, H=%d, D=%d\n", B, R, C, H, D);
+	
+	// Allocate host memory for FP16 input data
+	__fp16* q_fp16_data = (__fp16*)malloc(B * H * R * D * sizeof(__fp16));
+	__fp16* k_fp16_data = (__fp16*)malloc(B * H * C * D * sizeof(__fp16));
+	__fp16* v_fp16_data = (__fp16*)malloc(B * H * C * D * sizeof(__fp16));
+	
+	// Load FP16 data from PyTorch files
+	FILE* f;
+	f = fopen("/tmp/pytorch_kernel_q_fp16.bin", "rb");
+	if (f) {
+		fread(q_fp16_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		printf("✅ Loaded Q FP16 data from disk\n");
+	} else {
+		// If FP16 files don't exist, load FP32 and convert
+		printf("FP16 files not found, loading FP32 and converting...\n");
+		float* q_fp32_data = (float*)malloc(B * H * R * D * sizeof(float));
+		f = fopen("/tmp/pytorch_q_input.bin", "rb");
+		if (f) {
+			fread(q_fp32_data, sizeof(float), B * H * R * D, f);
+			fclose(f);
+			// Convert FP32 to FP16
+			for (int i = 0; i < B * H * R * D; i++) {
+				q_fp16_data[i] = (__fp16)q_fp32_data[i];
+			}
+			printf("✅ Loaded and converted Q data from FP32\n");
+		}
+		free(q_fp32_data);
+	}
+	
+	f = fopen("/tmp/pytorch_kernel_k_fp16.bin", "rb");
+	if (f) {
+		fread(k_fp16_data, sizeof(__fp16), B * H * C * D, f);
+		fclose(f);
+		printf("✅ Loaded K FP16 data from disk\n");
+	} else {
+		// If FP16 files don't exist, load FP32 and convert
+		float* k_fp32_data = (float*)malloc(B * H * C * D * sizeof(float));
+		f = fopen("/tmp/pytorch_k_input.bin", "rb");
+		if (f) {
+			fread(k_fp32_data, sizeof(float), B * H * C * D, f);
+			fclose(f);
+			// Convert FP32 to FP16
+			for (int i = 0; i < B * H * C * D; i++) {
+				k_fp16_data[i] = (__fp16)k_fp32_data[i];
+			}
+			printf("✅ Loaded and converted K data from FP32\n");
+		}
+		free(k_fp32_data);
+	}
+	
+	f = fopen("/tmp/pytorch_kernel_v_fp16.bin", "rb");
+	if (f) {
+		fread(v_fp16_data, sizeof(__fp16), B * H * C * D, f);
+		fclose(f);
+		printf("✅ Loaded V FP16 data from disk\n");
+	} else {
+		// If FP16 files don't exist, load FP32 and convert
+		float* v_fp32_data = (float*)malloc(B * H * C * D * sizeof(float));
+		f = fopen("/tmp/pytorch_v_input.bin", "rb");
+		if (f) {
+			fread(v_fp32_data, sizeof(float), B * H * C * D, f);
+			fclose(f);
+			// Convert FP32 to FP16
+			for (int i = 0; i < B * H * C * D; i++) {
+				v_fp16_data[i] = (__fp16)v_fp32_data[i];
+			}
+			printf("✅ Loaded and converted V data from FP32\n");
+		}
+		free(v_fp32_data);
+	}
+	
+	// Print sample values for verification
+	printf("Sample values: Q[0]=%f, K[0]=%f, V[0]=%f\n", 
+		(float)q_fp16_data[0], (float)k_fp16_data[0], (float)v_fp16_data[0]);
+	
+	// Create CCV tensors for input
+	// Use NHWC layout: [batch, heads, seq, dim]
+	ccv_nnc_tensor_t* q_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, R, D), 0);
+	ccv_nnc_tensor_t* k_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* v_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, C, D), 0);
+	
+	// Copy data to CCV tensors
+	memcpy(q_tensor->data.f16, q_fp16_data, B * H * R * D * sizeof(__fp16));
+	memcpy(k_tensor->data.f16, k_fp16_data, B * H * C * D * sizeof(__fp16));
+	memcpy(v_tensor->data.f16, v_fp16_data, B * H * C * D * sizeof(__fp16));
+	
+	printf("✅ Created CCV tensors and copied input data\n");
+	
+	// Move tensors to GPU
+	ccv_nnc_tensor_t* gpu_q_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, R, D), 0);
+	ccv_nnc_tensor_t* gpu_k_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, C, D), 0);
+	ccv_nnc_tensor_t* gpu_v_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, C, D), 0);
+	
+	// Copy data to GPU tensors
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor), TENSOR_LIST(gpu_q_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(k_tensor), TENSOR_LIST(gpu_k_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(v_tensor), TENSOR_LIST(gpu_v_tensor), 0);
+	
+	printf("✅ Copied tensors to GPU\n");
+	
+	// Create output tensors - SageAttention requires quantized outputs
+	ccv_nnc_tensor_t* gpu_o_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, R, D), 0);
+	
+	// Create quantized output tensors (required by SageAttention)
+	const uint32_t BLKQ = 128;
+	const uint32_t WARPQ = 32;
+	const uint32_t BLKK = 64;
+	const size_t q_blocks = (R + BLKQ - 1) / BLKQ;
+	const size_t warps_per_block = BLKQ / WARPQ;
+	const int q_scale_blocks = q_blocks * warps_per_block;  // Should be 4
+	const int k_scale_blocks = (C + BLKK - 1) / BLKK;       // Should be 1
+	
+	ccv_nnc_tensor_t* gpu_q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, H, R, D), 0);
+	ccv_nnc_tensor_t* gpu_k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, H, C, D), 0);
+	ccv_nnc_tensor_t* gpu_q_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* gpu_k_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, H, k_scale_blocks), 0);
+	
+	// Create k_mean tensor (optional input for SageAttention)
+	ccv_nnc_tensor_t* k_mean_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, D), 0);
+	ccv_nnc_tensor_t* gpu_k_mean_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, H, D), 0);
+	
+	// Initialize k_mean to zeros
+	memset(k_mean_tensor->data.u8, 0, B * H * D * sizeof(__fp16));
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(k_mean_tensor), TENSOR_LIST(gpu_k_mean_tensor), 0);
+	
+	// Call scaled dot product attention forward using CCV command
+	// The command will internally call _ccv_nnc_scaled_dot_product_attention_forw
+	printf("\n=== Calling Scaled Dot Product Attention Forward (SageAttention) ===\n");
+	printf("Command parameters:\n");
+	printf("  scale: %f\n", sm_scale);
+	printf("  is_causal: 0 (false)\n");
+	
+	// Note: SageAttention implementation requires all output tensors to be provided
+	// Inputs: Q, K, V, attn_mask (NULL), weights (NULL), bias (NULL), k_mean
+	// Outputs: O, saved_softmax_lse (NULL), q_int8, k_int8, q_scale, k_scale
+	ccv_nnc_cmd_exec(
+		CMD_SCALED_DOT_PRODUCT_ATTENTION_FORWARD(sm_scale, 0), // scale, is_causal=false
+		ccv_nnc_no_hint, 
+		0, 
+		TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor, 0, 0, 0, gpu_k_mean_tensor), // inputs
+		TENSOR_LIST(gpu_o_tensor, 0, gpu_q_int8_tensor, gpu_k_int8_tensor, gpu_q_scale_tensor, gpu_k_scale_tensor), // outputs
+		0
+	);
+	
+	printf("✅ Scaled dot product attention forward completed\n");
+	
+	// Copy output back to CPU for analysis
+	ccv_nnc_tensor_t* cpu_output_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, H, R, D), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_o_tensor), TENSOR_LIST(cpu_output_tensor), 0);
+	
+	// Also copy the quantized outputs and scales back for verification
+	ccv_nnc_tensor_t* cpu_q_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, H, R, D), 0);
+	ccv_nnc_tensor_t* cpu_k_int8_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(8U, B, H, C, D), 0);
+	ccv_nnc_tensor_t* cpu_q_scale_output = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, q_scale_blocks), 0);
+	ccv_nnc_tensor_t* cpu_k_scale_output = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, H, k_scale_blocks), 0);
+	
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_q_int8_tensor), TENSOR_LIST(cpu_q_int8_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_k_int8_tensor), TENSOR_LIST(cpu_k_int8_tensor), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_q_scale_tensor), TENSOR_LIST(cpu_q_scale_output), 0);
+	ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_k_scale_tensor), TENSOR_LIST(cpu_k_scale_output), 0);
+	
+	printf("✅ Copied outputs back to CPU\n");
+	
+	// Extract output data for analysis
+	__fp16* output_data = (__fp16*)cpu_output_tensor->data.u8;
+	int8_t* q_int8_output = (int8_t*)cpu_q_int8_tensor->data.u8;
+	int8_t* k_int8_output = (int8_t*)cpu_k_int8_tensor->data.u8;
+	
+	printf("\n=== SageAttention Forward Output Analysis ===\n");
+	printf("Output tensor shape: [B=%d, H=%d, R=%d, D=%d]\n", B, H, R, D);
+	printf("First 10 output values:\n");
+	for (int i = 0; i < 10; i++) {
+		printf("  output[%d]: %f\n", i, (float)output_data[i]);
+	}
+	
+	printf("\nQuantized Q (first 10 values): ");
+	for (int i = 0; i < 10; i++) {
+		printf("%d ", q_int8_output[i]);
+	}
+	printf("\n");
+	
+	printf("Q scales (all %d values): ", q_scale_blocks);
+	for (int i = 0; i < q_scale_blocks; i++) {
+		printf("%.6f ", cpu_q_scale_output->data.f32[i]);
+	}
+	printf("\n");
+	
+	// Compare with previous test output if available
+	printf("\n=== Comparison with Direct Wrapper Test ===\n");
+	f = fopen("/tmp/ccv_wrapper_sage_output.bin", "rb");
+	if (f) {
+		__fp16* wrapper_data = (__fp16*)malloc(B * H * R * D * sizeof(__fp16));
+		fread(wrapper_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		
+		printf("Comparing first 10 values with direct wrapper test:\n");
+		for (int i = 0; i < 10; i++) {
+			float forw_val = (float)output_data[i];
+			float wrapper_val = (float)wrapper_data[i];
+			float diff = fabsf(forw_val - wrapper_val);
+			printf("  [%d] Forward: %f, Wrapper: %f, diff: %.8f\n", i, forw_val, wrapper_val, diff);
+		}
+		
+		// Full tensor comparison
+		int exact_matches = 0;
+		double max_diff = 0.0, sum_diff = 0.0;
+		int total_elements = B * H * R * D;
+		
+		for (int i = 0; i < total_elements; i++) {
+			double diff = fabs((float)output_data[i] - (float)wrapper_data[i]);
+			sum_diff += diff;
+			if (diff > max_diff) max_diff = diff;
+			if (diff < 1e-6) exact_matches++;
+		}
+		
+		printf("\nFull tensor comparison (%d elements):\n", total_elements);
+		printf("  Exact matches (diff < 1e-6): %d/%d (%.2f%%)\n", 
+			exact_matches, total_elements, (100.0 * exact_matches) / total_elements);
+		printf("  Maximum difference: %.8f\n", max_diff);
+		printf("  Average difference: %.8f\n", sum_diff / total_elements);
+		
+		REQUIRE_EQ_WITH_TOLERANCE(max_diff, 0, 1e-5, "Forward function and direct wrapper should produce identical results");
+		
+		free(wrapper_data);
+	} else {
+		printf("Direct wrapper output not found. Run 'ccv_nnc_sageattn_qk_int8_pv_fp16_cuda test' first for comparison.\n");
+	}
+	
+	// Save output for future comparisons
+	f = fopen("/tmp/ccv_forward_sage_output.bin", "wb");
+	if (f) {
+		fwrite(output_data, sizeof(__fp16), B * H * R * D, f);
+		fclose(f);
+		printf("✅ Saved forward function output to /tmp/ccv_forward_sage_output.bin\n");
+	}
+	
+	// Cleanup
+	ccv_nnc_tensor_free(q_tensor);
+	ccv_nnc_tensor_free(k_tensor);
+	ccv_nnc_tensor_free(v_tensor);
+	ccv_nnc_tensor_free(k_mean_tensor);
+	ccv_nnc_tensor_free(gpu_q_tensor);
+	ccv_nnc_tensor_free(gpu_k_tensor);
+	ccv_nnc_tensor_free(gpu_v_tensor);
+	ccv_nnc_tensor_free(gpu_o_tensor);
+	ccv_nnc_tensor_free(gpu_k_mean_tensor);
+	ccv_nnc_tensor_free(gpu_q_int8_tensor);
+	ccv_nnc_tensor_free(gpu_k_int8_tensor);
+	ccv_nnc_tensor_free(gpu_q_scale_tensor);
+	ccv_nnc_tensor_free(gpu_k_scale_tensor);
+	ccv_nnc_tensor_free(cpu_output_tensor);
+	ccv_nnc_tensor_free(cpu_q_int8_tensor);
+	ccv_nnc_tensor_free(cpu_k_int8_tensor);
+	ccv_nnc_tensor_free(cpu_q_scale_output);
+	ccv_nnc_tensor_free(cpu_k_scale_output);
+	
+	free(q_fp16_data);
+	free(k_fp16_data);
+	free(v_fp16_data);
+	
+	printf("✅ SageAttention forward function test completed successfully!\n");
 }
 
 #include "case_main.h"
