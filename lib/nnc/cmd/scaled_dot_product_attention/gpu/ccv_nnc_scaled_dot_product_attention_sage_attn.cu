@@ -1142,27 +1142,13 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     // Core inputs
     ccv_nnc_tensor_view_t* const q = (ccv_nnc_tensor_view_t*)inputs[0];
     ccv_nnc_tensor_view_t* const k = (ccv_nnc_tensor_view_t*)inputs[1];
-    ccv_nnc_tensor_view_t* const v = (ccv_nnc_tensor_view_t*)inputs[2];
-    
-    // Optional inputs
-    ccv_nnc_tensor_view_t* const k_mean = input_size > 6 ? (ccv_nnc_tensor_view_t*)inputs[3] : 0;
-    
+    ccv_nnc_tensor_view_t* const v = (ccv_nnc_tensor_view_t*)inputs[2];    
   
     // Core output
     ccv_nnc_tensor_view_t* const o = (ccv_nnc_tensor_view_t*)outputs[0];
     
     // Optional outputs - these should be provided by the caller if quantized outputs are needed
     ccv_nnc_tensor_view_t* const saved_softmax_lse = output_size > 1 ? (ccv_nnc_tensor_view_t*)outputs[1] : 0;
-    ccv_nnc_tensor_view_t* const q_int8 = output_size > 2 ? (ccv_nnc_tensor_view_t*)outputs[2] : 0;
-    ccv_nnc_tensor_view_t* const k_int8 = output_size > 3 ? (ccv_nnc_tensor_view_t*)outputs[3] : 0;
-    ccv_nnc_tensor_view_t* const q_scale = output_size > 4 ? (ccv_nnc_tensor_view_t*)outputs[4] : 0;
-    ccv_nnc_tensor_view_t* const k_scale = output_size > 5 ? (ccv_nnc_tensor_view_t*)outputs[5] : 0;
-    
-    // For SageAttention to work, we need the quantized outputs
-    if (!q_int8 || !k_int8 || !q_scale || !k_scale) {
-        // If quantized outputs are not provided, we cannot proceed
-        return CCV_NNC_EXEC_INVALID;
-    }
     
     // Validate tensor dimensions
     const int q_nd = ccv_nnc_tensor_nd(q->info.dim);
@@ -1201,7 +1187,13 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     int Hq; // number of heads for Q
     int Hk; // number of heads for K/V
     int D;  // head dimension
-    
+    printf("DEBUG: Raw dimensions:\n");
+  printf("  qdim: [%d, %d, %d, %d]\n", qdim[0], qdim[1], qdim[2], qdim[3]);
+  printf("  kdim: [%d, %d, %d, %d]\n", kdim[0], kdim[1], kdim[2], kdim[3]);
+  printf("  vdim: [%d, %d, %d, %d]\n", vdim[0], vdim[1], vdim[2], vdim[3]);
+  printf("  odim: [%d, %d, %d, %d]\n", odim[0], odim[1], odim[2], odim[3]);
+
+
     if (q_nd == 3) {
         batch_size = qdim[1];
         assert(batch_size == kdim[1]);
@@ -1210,17 +1202,25 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
         Hq = Hk = 1;
         D = qdim[3];
         assert(D == kdim[3]);
+        printf("DEBUG:q_nd == 3 Parsed dimensions:\n");
+      printf("  batch_size=%d, R=%d, C=%d, Hq=%d, D=%d\n",
+             batch_size, R, C, Hq, D);
+
     } else if (q_nd == 4) {
         batch_size = qdim[0];
         assert(batch_size == kdim[0]);
-        R = qdim[1];
-        C = kdim[1];
-        Hq = qdim[2];
-        Hk = kdim[2];
+        R = qdim[2];
+        C = kdim[2];
+        Hq = qdim[1];
+        Hk = kdim[1];
         assert(Hq >= Hk);
         assert(Hq % Hk == 0);
         D = qdim[3];
         assert(D == kdim[3]);
+        printf("DEBUG: q_nd == 4 Parsed dimensions:\n");
+      printf("  batch_size=%d, R=%d, C=%d, Hq=%d, Hk=%d, D=%d\n",
+             batch_size, R, C, Hq, Hk, D);
+
     }
 
     // Check if tensors are in the correct data type
@@ -1238,12 +1238,6 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     if (D != 64 && D != 128) {
         return CCV_NNC_EXEC_INVALID;
     }
-
-    // Validate quantized output tensors
-    assert(q_int8->info.datatype == CCV_8U);
-    assert(k_int8->info.datatype == CCV_8U);
-    assert(q_scale->info.datatype == CCV_32F);
-    assert(k_scale->info.datatype == CCV_32F);
     
     // SageAttention quantization parameters
     const int BLKQ = 128;  // Block size for Q quantization
@@ -1273,14 +1267,28 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     const size_t warps_per_block = BLKQ / WARPQ;
     const int q_scale_blocks = q_blocks * warps_per_block;
     const int k_scale_blocks = (C + BLKK - 1) / BLKK;
-
+    printf("DEBUG: Scale tensor calculation:\n");
+    printf("  R=%d, BLKQ=%d, WARPQ=%d\n", R, BLKQ, WARPQ);
+    printf("  q_blocks=%zu, warps_per_block=%zu\n", q_blocks, warps_per_block);
+    printf("  q_scale_blocks=%d, k_scale_blocks=%d\n", q_scale_blocks, k_scale_blocks);
     // Create internal quantization tensors on GPU
     ccv_nnc_tensor_t* q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hq, R, D), 0);
     ccv_nnc_tensor_t* k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hk, C, D), 0);
     ccv_nnc_tensor_t* q_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hq, q_scale_blocks), 0);
     ccv_nnc_tensor_t* k_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hk, k_scale_blocks), 0);
-    // Optional k_mean tensor - create as zeros if not provided
     ccv_nnc_tensor_t* k_mean_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, batch_size, Hk, D), 0);
+    
+    // Initialize k_mean to zeros
+      CUDA_ENFORCE(cudaMemsetAsync(k_mean_tensor->data.u8, 0,
+          ccv_nnc_tensor_count(k_mean_tensor->info) * sizeof(half),
+          ccv_nnc_stream_context_get_stream(stream_context)));
+
+    ccv_nnc_tensor_view_t* q_int8 = (ccv_nnc_tensor_view_t*)q_int8_tensor;
+    ccv_nnc_tensor_view_t* k_int8 = (ccv_nnc_tensor_view_t*)k_int8_tensor;
+    ccv_nnc_tensor_view_t* q_scale = (ccv_nnc_tensor_view_t*)q_scale_tensor;
+    ccv_nnc_tensor_view_t* k_scale = (ccv_nnc_tensor_view_t*)k_scale_tensor;
+    ccv_nnc_tensor_view_t* k_mean = (ccv_nnc_tensor_view_t*)k_mean_tensor;
+
 
     // Call SageAttention with proper parameters
     // tensor_layout: 1 for HND (batch, heads, seq, dim) - CCV uses NHWC which maps to HND
@@ -1324,13 +1332,11 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     ccv_nnc_tensor_view_get_stride(q_scale, q_scale_stride);
     ccv_nnc_tensor_view_get_stride(k_scale, k_scale_stride);
 
-    // Handle optional k_mean tensor
     int km_dim[CCV_NNC_MAX_DIM_ALLOC];
     int km_stride[CCV_NNC_MAX_DIM_ALLOC];
-    if (k_mean) {
-        ccv_nnc_tensor_view_get_dim(k_mean, km_dim);
-        ccv_nnc_tensor_view_get_stride(k_mean, km_stride);
-    }
+    ccv_nnc_tensor_view_get_dim(k_mean, km_dim);
+    ccv_nnc_tensor_view_get_stride(k_mean, km_stride);
+    
 
     // Get CUDA stream
     cudaStream_t cuda_stream = ccv_nnc_stream_context_get_stream(stream_context);
@@ -1339,7 +1345,7 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
         (half*)q->data.f16,           // query data
         (half*)k->data.f16,           // key data
-        k_mean ? (half*)k_mean_tensor->data.f16 : NULL, // k_mean data (optional)
+        (half*)k_mean->data.f16, // k_mean data (optional)
         (half*)v->data.f16,           // value data
         (int8_t*)q_int8->data.u8,     // q_int8 output data
         (int8_t*)k_int8->data.u8,     // k_int8 output data

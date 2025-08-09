@@ -5339,7 +5339,7 @@ TEST_CASE("_ccv_nnc_scaled_dot_product_attention_forw sage test")
 		ccv_nnc_no_hint, 
 		0, 
 		TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor, 0, 0, 0), // inputs
-		TENSOR_LIST(gpu_o_tensor, 0, gpu_q_int8_tensor, gpu_k_int8_tensor, gpu_q_scale_tensor, gpu_k_scale_tensor), // outputs
+		TENSOR_LIST(gpu_o_tensor, 0), // outputs
 		0
 	);
 	
