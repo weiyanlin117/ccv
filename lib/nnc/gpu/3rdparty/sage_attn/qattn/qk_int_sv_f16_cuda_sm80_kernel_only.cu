@@ -757,6 +757,28 @@ template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 128, DataTyp
     const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
     float sm_scale);
 
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 128, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
+    float, false, half, ComputeUnit::kTensorCore, MaskMode::kCausal, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 64, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
+    float, false, half, ComputeUnit::kTensorCore, MaskMode::kCausal, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
 
 template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 128, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerWarp,
     float, false, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>(
@@ -782,6 +804,105 @@ template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 64, DataType
 
 template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 64, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
     float, false, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// Additional template instantiations for inst_buf variants (use_inst_buffer=true)
+// These are needed for the qk_int8_sv_f16_accum_f16_attn_inst_buf_direct function
+
+// HEAD_DIM=128, WARP_Q=16, QuantGranularity::kPerWarp (2), Non-causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 16, 64, 128, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerWarp,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// HEAD_DIM=128, WARP_Q=16, QuantGranularity::kPerWarp (2), Causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 16, 64, 128, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerWarp,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kCausal, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// HEAD_DIM=64, WARP_Q=32, QuantGranularity::kPerWarp (2), Non-causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 64, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerWarp,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// HEAD_DIM=64, WARP_Q=32, QuantGranularity::kPerWarp (2), Causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 64, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerWarp,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kCausal, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// HEAD_DIM=128, WARP_Q=16, QuantGranularity::kPerThread (3), Non-causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 16, 64, 128, DataType::kInt8, QuantGranularity::kPerThread, QuantGranularity::kPerThread,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// HEAD_DIM=128, WARP_Q=16, QuantGranularity::kPerThread (3), Causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 16, 64, 128, DataType::kInt8, QuantGranularity::kPerThread, QuantGranularity::kPerThread,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kCausal, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// HEAD_DIM=64, WARP_Q=32, QuantGranularity::kPerThread (3), Non-causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 64, DataType::kInt8, QuantGranularity::kPerThread, QuantGranularity::kPerThread,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>(
+    int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
+    float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
+    const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
+    const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
+    const uint32_t stride_bz_k, const uint32_t stride_seq_k, const uint32_t stride_h_k,
+    const uint32_t stride_bz_v, const uint32_t stride_seq_v, const uint32_t stride_h_v,
+    const uint32_t stride_bz_o, const uint32_t stride_seq_o, const uint32_t stride_h_o,
+    float sm_scale);
+
+// HEAD_DIM=64, WARP_Q=32, QuantGranularity::kPerThread (3), Causal
+template __global__ void qk_int_sv_f16_attn_kernel<128, 64, 32, 64, 64, DataType::kInt8, QuantGranularity::kPerThread, QuantGranularity::kPerThread,
+    float, true, half, ComputeUnit::kTensorCore, MaskMode::kCausal, false, false>(
     int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, half *__restrict__ O, float *__restrict__ Lse,
     float *__restrict__ Q_scale, float *__restrict__ K_scale, half *__restrict__ V_mean,
     const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,

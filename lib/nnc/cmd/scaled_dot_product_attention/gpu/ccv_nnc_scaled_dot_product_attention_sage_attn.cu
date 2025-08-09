@@ -14,46 +14,7 @@ extern "C" {
 #include "qattn/attn_utils.cuh"
 #include "fused.h"
 #include "qattn/qk_int_sv_f16_cuda_sm80_kernel_only.cuh"
-
-// Helper macro for grid size calculation  
-#define DIV_CEIL(x, y) (((x) + (y) - 1) / (y))
-
-#define DISPATCH_BLOCK_SIZE(block_size, BLOCK_SIZE, ...)        \
-  if (block_size == 64) {                                       \
-    constexpr int BLOCK_SIZE = 64;                              \
-    __VA_ARGS__                                                 \
-  } else if (block_size == 128) {                               \
-    constexpr int BLOCK_SIZE = 128;                             \
-    __VA_ARGS__                                                 \
-  }  else {                                                     \
-    printf("Unsupported block_size: %d\n", (int)block_size);    \
-    assert(0);                                                   \
-  }
-
-#define DISPATCH_WARP_BLOCK_SIZE(warp_block_size, WARP_BLOCK_SIZE, ...)  \
-  if (warp_block_size == 16) {                                           \
-    constexpr int WARP_BLOCK_SIZE = 16;                                  \
-    __VA_ARGS__                                                          \
-  } else if (warp_block_size == 32) {                                    \
-    constexpr int WARP_BLOCK_SIZE = 32;                                  \
-    __VA_ARGS__                                                          \
-  }  else {                                                              \
-    printf("Unsupported warp_block_size: %d\n", (int)warp_block_size);   \
-    assert(0);                                                   		 \
-  }
-
-#define DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, ...)              \
-  if (head_dim == 64) {                                         \
-    constexpr int HEAD_DIM = 64;                                \
-    __VA_ARGS__                                                 \
-  } else if (head_dim == 128) {                                 \
-    constexpr int HEAD_DIM = 128;                               \
-    __VA_ARGS__                                                 \
-  } else {                                                      \
-    printf("Unsupported HEAD_DIM: %d\n", (int)head_dim);        \
-    assert(0);                                                  \
-  }
-
+#include "sage_attn_utils.cuh"
 
 // Direct kernel wrapper for raw kernel testing (bypasses all CCV wrappers)
 extern "C" void call_sage_attention_kernel_direct(
@@ -173,15 +134,17 @@ extern "C" int ccv_nnc_qk_int8_sv_f16_accum_f32_attn(
     ccv_nnc_tensor_view_get_dim(o_view, odim);
     
     // Extract dimensions based on tensor layout
-    int batch_size, num_heads, seq_len, head_dim;
+    int batch_size, num_heads, qo_len, kv_len, head_dim;
     if (tensor_layout == 1) { // HND layout: [batch, heads, seq, dim]
         batch_size = qdim[0];
         num_heads = qdim[1]; 
-        seq_len = qdim[2];
+        qo_len = qdim[2];
+        kv_len = kdim[2];
         head_dim = qdim[3];
     } else { // NHD layout (tensor_layout == 0): [batch, seq, heads, dim]
         batch_size = qdim[0];
-        seq_len = qdim[1];
+        qo_len = qdim[1];
+        kv_len = kdim[1];
         num_heads = qdim[2];
         head_dim = qdim[3];
     }
@@ -205,7 +168,7 @@ extern "C" int ccv_nnc_qk_int8_sv_f16_accum_f32_attn(
     printf("  Key: [%d, %d, %d, %d], dtype: %d\n", kdim[0], kdim[1], kdim[2], kdim[3], k_view->info.datatype);
     printf("  Value: [%d, %d, %d, %d], dtype: %d\n", vdim[0], vdim[1], vdim[2], vdim[3], v_view->info.datatype);
     printf("  Output: [%d, %d, %d, %d], dtype: %d\n", odim[0], odim[1], odim[2], odim[3], o_view->info.datatype);
-    printf("Extracted dimensions: B=%d, H=%d, S=%d, D=%d\n", batch_size, num_heads, seq_len, head_dim);
+    printf("Extracted dimensions: B=%d, H=%d, S=%d, D=%d\n", batch_size, num_heads, qo_len, head_dim);
     
     // Get actual tensor strides (like PyTorch does, following CCV GPU patterns)
     int qstride[CCV_NNC_MAX_DIM_ALLOC];
@@ -289,26 +252,49 @@ extern "C" int ccv_nnc_qk_int8_sv_f16_accum_f32_attn(
     // PyTorch uses: CTA_Q=128, CTA_K=64, WARP_Q=32, WARP_K=64, HEAD_DIM=128
     constexpr uint32_t CTA_Q = 128, CTA_K = 64;
     constexpr uint32_t WARP_Q = 32, WARP_K = 64;
-    
     // Calculate shared memory requirement (exactly as PyTorch does)
-    size_t smem_max = std::max(
-        CTA_Q * head_dim * sizeof(int8_t) + CTA_K * head_dim * sizeof(int8_t) + CTA_K * head_dim * sizeof(half),
-        CTA_Q * head_dim * sizeof(half)
-    );
+    // size_t smem_max = std::max(
+    //     CTA_Q * head_dim * sizeof(int8_t) + CTA_K * head_dim * sizeof(int8_t) + CTA_K * head_dim * sizeof(half),
+    //     CTA_Q * head_dim * sizeof(half)
+    // );
     
     // Grid and block dimensions matching call_sage_attention_kernel_direct
-    dim3 grid_dim((seq_len + CTA_Q - 1) / CTA_Q, num_heads, batch_size);
-    dim3 block_dim(32, 4);  // PyTorch uses (32, 4) block dimensions
-    
-    // For HND layout (tensor_layout=1), need to pass strides in HND order to kernel
-    // Based on our successful fix in cublas.tests.c
-    if (tensor_layout == 1) {
-        // Swap seq and h strides for HND layout (matches our previous fix)
-        
-        // DEBUG: Print all input and template parameters before kernel launch (HND layout)
+    // dim3 grid_dim((qo_len + CTA_Q - 1) / CTA_Q, num_heads, batch_size);
+    // dim3 block_dim(32, 4);  // PyTorch uses (32, 4) block dimensions
+    const int num_kv_groups = 1; // num_qo_heads / num_kv_heads;
+
+    DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
+        DISPATCH_CAUSAL(is_causal, IS_CAUSAL, {
+            DISPATCH_QK_QUANT_GRAN(qk_quant_gran, QK_QUANT_GRAN, {
+                    constexpr int CTA_Q = 128;
+                    constexpr int CTA_K = 64;
+                    constexpr int WARP_Q = 32;
+                    constexpr int WARP_K = 64;
+
+                    constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
+
+                    //                                     smem_Q                                     smem_K                            smem_V                     smem_O
+                    size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
+                    
+                    // Debug template parameters before kernel instantiation
+                    printf("\n=== PyTorch Kernel Template Parameters ===\n");
+                    printf("CTA_Q=%d, CTA_K=%d, WARP_Q=%d, WARP_K=%d, HEAD_DIM=%d\n", CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM);
+                    printf("DTypeSVAccum: float, use_inst_buffer: false, DTypeOut: half\n");
+                    printf("ComputeUnit: kTensorCore, MaskMode: %d, RETURN_LSE: %s\n", static_cast<int>(mask_mode),  "false");
+                    printf("smem_max: %zu bytes\n", smem_max);
+                    
+                    // auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, false, half, ComputeUnit::kTensorCore, 
+                    //                                             mask_mode, RETURN_LSE, false>;
+
+                    // cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
+
+                    dim3 grid_dim(div_ceil(qo_len, CTA_Q), num_heads, batch_size);
+                    dim3 block_dim(32, (CTA_Q / WARP_Q) * (CTA_K / WARP_K));
+
+                     //     // DEBUG: Print all input and template parameters before kernel launch (HND layout)
         printf("=== KERNEL LAUNCH DEBUG INFO (HND layout) ===\n");
         printf("Input Parameters:\n");
-        printf("  batch_size=%d, num_heads=%d, seq_len=%d, head_dim=%d\n", batch_size, num_heads, seq_len, head_dim);
+        printf("  batch_size=%d, num_heads=%d, qo_len=%d, head_dim=%d\n", batch_size, num_heads, qo_len, head_dim);
         printf("  tensor_layout=%d (HND)\n", tensor_layout);
         printf("  q_view->data.u8=%p, k_view->data.u8=%p\n", q_view->data.u8, k_view->data.u8);
         printf("  v_view->data.f16=%p, o_view->data.f16=%p\n", v_view->data.f16, o_view->data.f16);
@@ -348,101 +334,31 @@ extern "C" int ccv_nnc_qk_int8_sv_f16_accum_f32_attn(
         printf("  stride_bz_o=%d, stride_seq_o=%d, stride_h_o=%d\n", stride_bz_o, stride_seq_o, stride_h_o);
         printf("  sm_scale=%f\n", sm_scale);
         printf("=== END DEBUG INFO ===\n");
-        fflush(stdout);
-        
-        // Launch kernel with exact same template as call_sage_attention_kernel_direct
-        if (head_dim == 128) {
-            qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, 128, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
-                float, false, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>
-                <<<grid_dim, block_dim, smem_max>>>(
-                (int8_t*)q_view->data.u8,   // Q (int8)
-                (int8_t*)k_view->data.u8,   // K (int8)
-                (half*)v_view->data.f16,     // V (fp16)
-                (half*)o_view->data.f16,     // O (fp16)
-                NULL,                       // Lse (not used)
-                (float*)q_scale_view->data.f32,  // Q_scale
-                (float*)k_scale_view->data.f32,  // K_scale
-                NULL,                       // V_mean (not used)
-                seq_len,                    // qo_len
-                seq_len,                    // kv_len (assuming self-attention)
-                1,                          // num_kv_groups
-                stride_bz_q, stride_seq_q, stride_h_q,  // Fixed order: batch, seq, head (matches direct function)
-                stride_bz_k, stride_seq_k, stride_h_k,  // Fixed order: batch, seq, head (matches direct function)
-                stride_bz_v, stride_seq_v, stride_h_v,  // Fixed order: batch, seq, head (matches direct function)
-                stride_bz_o, stride_seq_o, stride_h_o,  // Fixed order: batch, seq, head (matches direct function)
-                sm_scale
-            );
-        } else if (head_dim == 64) {
-            qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, 64, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
-                float, false, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>
-                <<<grid_dim, block_dim, smem_max>>>(
-                (int8_t*)q_view->data.u8,   // Q (int8)
-                (int8_t*)k_view->data.u8,   // K (int8)
-                (half*)v_view->data.f16,     // V (fp16)
-                (half*)o_view->data.f16,     // O (fp16)
-                NULL,                       // Lse (not used)
-                (float*)q_scale_view->data.f32,  // Q_scale
-                (float*)k_scale_view->data.f32,  // K_scale
-                NULL,                       // V_mean (not used)
-                seq_len,                    // qo_len
-                seq_len,                    // kv_len (assuming self-attention)
-                1,                          // num_kv_groups
-                stride_bz_q, stride_seq_q, stride_h_q,  // Fixed order: batch, seq, head (matches direct function)
-                stride_bz_k, stride_seq_k, stride_h_k,  // Fixed order: batch, seq, head (matches direct function)
-                stride_bz_v, stride_seq_v, stride_h_v,  // Fixed order: batch, seq, head (matches direct function)
-                stride_bz_o, stride_seq_o, stride_h_o,  // Fixed order: batch, seq, head (matches direct function)
-                sm_scale
-            );
-        }
-    } else {
-        // NHD layout - use original stride order
-        printf("NHD layout detected - using original stride order\n");
-        
-        // Launch kernel with exact same template as call_sage_attention_kernel_direct
-        if (head_dim == 128) {
-            qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, 128, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerWarp,
-                float, false, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>
-                <<<grid_dim, block_dim, smem_max>>>(
-                (int8_t*)q_view->data.u8,   // Q (int8)
-                (int8_t*)k_view->data.u8,   // K (int8)
-                (half*)v_view->data.f16,     // V (fp16)
-                (half*)o_view->data.f16,     // O (fp16)
-                NULL,                       // Lse (not used)
-                (float*)q_scale_view->data.f32,  // Q_scale
-                (float*)k_scale_view->data.f32,  // K_scale
-                NULL,                       // V_mean (not used)
-                seq_len,                    // qo_len
-                seq_len,                    // kv_len (assuming self-attention)
-                1,                          // num_kv_groups
-                stride_bz_q, stride_seq_q, stride_h_q,  // NHD: batch, seq, head
-                stride_bz_k, stride_seq_k, stride_h_k,  // NHD: batch, seq, head
-                stride_bz_v, stride_seq_v, stride_h_v,  // NHD: batch, seq, head
-                stride_bz_o, stride_seq_o, stride_h_o,  // NHD: batch, seq, head
-                sm_scale
-            );
-        } else if (head_dim == 64) {
-            qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, 64, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerWarp,
-                float, false, half, ComputeUnit::kTensorCore, MaskMode::kNone, false, false>
-                <<<grid_dim, block_dim, smem_max>>>(
-                (int8_t*)q_view->data.u8,   // Q (int8)
-                (int8_t*)k_view->data.u8,   // K (int8)
-                (half*)v_view->data.f16,     // V (fp16)
-                (half*)o_view->data.f16,     // O (fp16)
-                NULL,                       // Lse (not used)
-                (float*)q_scale_view->data.f32,  // Q_scale
-                (float*)k_scale_view->data.f32,  // K_scale
-                NULL,                       // V_mean (not used)
-                seq_len,                    // qo_len
-                seq_len,                    // kv_len (assuming self-attention)
-                1,                          // num_kv_groups
-                stride_bz_q, stride_seq_q, stride_h_q,  // NHD: batch, seq, head
-                stride_bz_k, stride_seq_k, stride_h_k,  // NHD: batch, seq, head
-                stride_bz_v, stride_seq_v, stride_h_v,  // NHD: batch, seq, head
-                stride_bz_o, stride_seq_o, stride_h_o,  // NHD: batch, seq, head
-                sm_scale
-            );
-        }
-    }
+                    
+                    qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
+                    float, false, half, ComputeUnit::kTensorCore, mask_mode, false, false>
+                    <<<grid_dim, block_dim, smem_max>>>(
+                    (int8_t*)q_view->data.u8,   // Q (int8)
+                    (int8_t*)k_view->data.u8,   // K (int8)
+                    (half*)v_view->data.f16,     // V (fp16)
+                    (half*)o_view->data.f16,     // O (fp16)
+                    NULL,                       // Lse (not used)
+                    (float*)q_scale_view->data.f32,  // Q_scale
+                    (float*)k_scale_view->data.f32,  // K_scale
+                    NULL,                       // V_mean (not used)
+                    qo_len,                    // qo_len
+                    kv_len,                    // kv_len (assuming self-attention)
+                    num_kv_groups,                          // num_kv_groups
+                    stride_bz_q, stride_seq_q, stride_h_q,  // Fixed order: batch, seq, head (matches direct function)
+                    stride_bz_k, stride_seq_k, stride_h_k,  // Fixed order: batch, seq, head (matches direct function)
+                    stride_bz_v, stride_seq_v, stride_h_v,  // Fixed order: batch, seq, head (matches direct function)
+                    stride_bz_o, stride_seq_o, stride_h_o,  // Fixed order: batch, seq, head (matches direct function)
+                    sm_scale
+                    );
+                    
+            });
+        });
+    });
     
     // Check for CUDA errors
     cudaError_t error = cudaGetLastError();
@@ -624,6 +540,167 @@ extern "C" int ccv_nnc_quant_per_warp_int8_cuda(
 }
 
 
+// // Direct kernel wrapper for qk_int8_sv_f16_accum_f16_attn with instruction buffer (no CCV dependencies)
+// extern "C" void qk_int8_sv_f16_accum_f16_attn_inst_buf_direct(
+//     int8_t *Q, int8_t *K, half *V, half *O,
+//     float *Q_scale, float *K_scale,
+//     int qdim[], int kdim[], int vdim[], int odim[], 
+//     int qscale_dim[], int kscale_dim[],
+//     int qstride[], int kstride[], int vstride[], int ostride[],
+//     int qscale_stride[], int kscale_stride[],
+//     int tensor_layout,
+//     int is_causal,
+//     int qk_quant_gran,
+//     float sm_scale,
+//     int return_lse)
+// {
+//     // Extract dimensions based on tensor layout
+//     int batch_size, num_heads, seq_len, head_dim;
+//     int num_kv_heads, kv_len;
+    
+//     if (tensor_layout == 1) { // HND layout: [batch, heads, seq, dim]
+//         batch_size = qdim[0];
+//         num_heads = qdim[1];
+//         seq_len = qdim[2];
+//         head_dim = qdim[3];
+//         num_kv_heads = kdim[1];
+//         kv_len = kdim[2];
+//     } else { // NHD layout: [batch, seq, heads, dim]
+//         batch_size = qdim[0];
+//         seq_len = qdim[1];
+//         num_heads = qdim[2];
+//         head_dim = qdim[3];
+//         num_kv_heads = kdim[2];
+//         kv_len = kdim[1];
+//     }
+    
+//     // Validate dimensions
+//     assert(num_heads % num_kv_heads == 0);
+//     const int num_kv_groups = num_heads / num_kv_heads;
+    
+//     if (head_dim != 64 && head_dim != 128) {
+//         fprintf(stderr, "ERROR: Unsupported head dimension %d (only 64 and 128 supported)\n", head_dim);
+//         return;
+//     }
+    
+//     // Extract strides based on tensor layout
+//     uint32_t stride_bz_q, stride_seq_q, stride_h_q;
+//     uint32_t stride_bz_k, stride_seq_k, stride_h_k;
+//     uint32_t stride_bz_v, stride_seq_v, stride_h_v;
+//     uint32_t stride_bz_o, stride_seq_o, stride_h_o;
+    
+//     if (tensor_layout == 1) { // HND layout
+//         stride_bz_q = qstride[0];
+//         stride_h_q = qstride[1];
+//         stride_seq_q = qstride[2];
+        
+//         stride_bz_k = kstride[0];
+//         stride_h_k = kstride[1];
+//         stride_seq_k = kstride[2];
+        
+//         stride_bz_v = vstride[0];
+//         stride_h_v = vstride[1];
+//         stride_seq_v = vstride[2];
+        
+//         stride_bz_o = ostride[0];
+//         stride_h_o = ostride[1];
+//         stride_seq_o = ostride[2];
+//     } else { // NHD layout
+//         stride_bz_q = qstride[0];
+//         stride_seq_q = qstride[1];
+//         stride_h_q = qstride[2];
+        
+//         stride_bz_k = kstride[0];
+//         stride_seq_k = kstride[1];
+//         stride_h_k = kstride[2];
+        
+//         stride_bz_v = vstride[0];
+//         stride_seq_v = vstride[1];
+//         stride_h_v = vstride[2];
+        
+//         stride_bz_o = ostride[0];
+//         stride_seq_o = ostride[1];
+//         stride_h_o = ostride[2];
+//     }
+    
+//     // Kernel configuration
+//     constexpr uint32_t CTA_Q = 128;
+//     constexpr uint32_t CTA_K = 64;
+//     constexpr uint32_t WARP_K = 64;
+    
+//     // Print debug info
+//     printf("\n=== qk_int8_sv_f16_accum_f16_attn_inst_buf_direct ===\n");
+//     printf("Dimensions: B=%d, H=%d, S=%d, D=%d, H_kv=%d, S_kv=%d\n", 
+//            batch_size, num_heads, seq_len, head_dim, num_kv_heads, kv_len);
+//     printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
+    
+//     // Launch kernel based on parameters with proper WARP_Q dispatch
+//     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
+//         // WARP_Q depends on HEAD_DIM
+//         constexpr uint32_t WARP_Q = (HEAD_DIM == 64) ? 32 : 16;
+        
+//         // Calculate shared memory requirement
+//         size_t smem_max = std::max(
+//             CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half),
+//             CTA_Q * HEAD_DIM * sizeof(half)
+//         );
+        
+//         // Grid and block dimensions
+//         dim3 grid_dim((seq_len + CTA_Q - 1) / CTA_Q, num_heads, batch_size);
+//         dim3 block_dim(32, (CTA_Q / WARP_Q) * (CTA_K / WARP_K));
+        
+//         printf("Grid: (%d, %d, %d), Block: (%d, %d)\n", 
+//                grid_dim.x, grid_dim.y, grid_dim.z, block_dim.x, block_dim.y);
+//         printf("Template params: CTA_Q=%d, CTA_K=%d, WARP_Q=%d, WARP_K=%d, HEAD_DIM=%d\n", 
+//                CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM);
+//         printf("Shared memory: %zu bytes\n", smem_max);
+        
+//         DISPATCH_CAUSAL(is_causal, IS_CAUSAL, {
+//             DISPATCH_QK_QUANT_GRAN(qk_quant_gran, QK_QUANT_GRAN, {
+                    
+//                     constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
+                    
+//                     auto kernel_func = qk_int_sv_f16_attn_kernel<
+//                         CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, 
+//                         DataType::kInt8, 
+//                         static_cast<QuantGranularity>(QK_QUANT_GRAN), 
+//                         static_cast<QuantGranularity>(QK_QUANT_GRAN), 
+//                         float,  // AccumDataType
+//                         true,   // use_inst_buffer
+//                         half,   // OutputDataType (FP16)
+//                         ComputeUnit::kTensorCore, 
+//                         mask_mode, 
+//                         false, 
+//                         false   // kInterleaved
+//                     >;
+                    
+//                     cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
+                    
+//                     kernel_func<<<grid_dim, block_dim, smem_max>>>(
+//                         Q, K, V, O,
+//                         nullptr,
+//                         Q_scale, K_scale,
+//                         nullptr,  // V_mean (not used)
+//                         seq_len,  // qo_len
+//                         kv_len,   // kv_len
+//                         num_kv_groups,
+//                         stride_bz_q, stride_seq_q, stride_h_q,
+//                         stride_bz_k, stride_seq_k, stride_h_k,
+//                         stride_bz_v, stride_seq_v, stride_h_v,
+//                         stride_bz_o, stride_seq_o, stride_h_o,
+//                         sm_scale
+//                     );
+//             });
+//         });
+//     });
+    
+//     // Check for CUDA errors
+//     cudaError_t error = cudaGetLastError();
+//     if (error != cudaSuccess) {
+//         fprintf(stderr, "ERROR: qk_int8_sv_f16_accum_f16_attn_inst_buf_direct kernel failed: %s\n", 
+//                 cudaGetErrorString(error));
+//     }
+// }
 
 // Per-block INT8 quantization with mean subtraction function
 extern "C" int ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda(
@@ -1170,8 +1247,40 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     
     // SageAttention quantization parameters
     const int BLKQ = 128;  // Block size for Q quantization
-    const int WARPQ = 32;  // Warp size for Q quantization
     const int BLKK = 64;   // Block size for K quantization
+    // Determine accumulation type and corresponding WARPQ based on head dimension and scale tensor shape
+    // Following PyTorch pattern: WARPQ=(16 if (q.size(-1) == 128 and pv_accum_dtype == "fp16+fp32") else 32)
+    sage_attn_pv_accum_dtype pv_accum_dtype; 
+    if (cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U_32F) {
+        pv_accum_dtype = DTYPE_FP32;
+    } else {
+        // default using mix
+        pv_accum_dtype = DTYPE_FP16_MIX_FP32;
+    }
+
+    int WARPQ;    
+    // Use the same logic as PyTorch SageAttention
+    if (D == 128 && pv_accum_dtype == DTYPE_FP16_MIX_FP32) {
+        // Head dimension 128 with 8 scales per head -> FP16_MIX_FP32 accumulation
+        WARPQ = 16;
+    } else {
+        // Default to FP32 accumulation with WARPQ=32
+        WARPQ = 32;
+    }
+
+    // Calculate quantization tensor dimensions
+    const size_t q_blocks = (R + BLKQ - 1) / BLKQ;
+    const size_t warps_per_block = BLKQ / WARPQ;
+    const int q_scale_blocks = q_blocks * warps_per_block;
+    const int k_scale_blocks = (C + BLKK - 1) / BLKK;
+
+    // Create internal quantization tensors on GPU
+    ccv_nnc_tensor_t* q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hq, R, D), 0);
+    ccv_nnc_tensor_t* k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hk, C, D), 0);
+    ccv_nnc_tensor_t* q_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hq, q_scale_blocks), 0);
+    ccv_nnc_tensor_t* k_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hk, k_scale_blocks), 0);
+    // Optional k_mean tensor - create as zeros if not provided
+    ccv_nnc_tensor_t* k_mean_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, batch_size, Hk, D), 0);
 
     // Call SageAttention with proper parameters
     // tensor_layout: 1 for HND (batch, heads, seq, dim) - CCV uses NHWC which maps to HND
@@ -1180,35 +1289,102 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     const int qk_quant_gran = 2; // per_warp quantization
     const float sm_scale = 1.0f / sqrtf((float)D); // scale = 1.0 / sqrt(head_dim)
     const int return_lse = saved_softmax_lse ? 1 : 0;
-    const sage_attn_pv_accum_dtype pv_accum_dtype = DTYPE_FP32; // FP32 accumulation
 
-    int result = ccv_nnc_sageattn_qk_int8_pv_fp16_cuda(
-        (ccv_nnc_tensor_t*)q,       // query (fp16 input)
-        (ccv_nnc_tensor_t*)k,       // key (fp16 input)
-        (ccv_nnc_tensor_t*)k_mean,  // k_mean (optional, from inputs)
-        (ccv_nnc_tensor_t*)v,       // value (fp16)
-        (ccv_nnc_tensor_t*)q_int8,  // q_int8 (output quantized Q)
-        (ccv_nnc_tensor_t*)k_int8,  // k_int8 (output quantized K)
-        (ccv_nnc_tensor_t*)q_scale, // query_scale (fp32 output)
-        (ccv_nnc_tensor_t*)k_scale, // key_scale (fp32 output)
-        (ccv_nnc_tensor_t*)o,       // output (fp16)
-        tensor_layout,              // tensor_layout: 1=HND
-        is_causal,                  // is_causal
-        qk_quant_gran,              // qk_quant_gran: 2=per_warp
-        sm_scale,                   // sm_scale
-        return_lse,                 // return_lse
-        pv_accum_dtype,             // pv_accum_dtype: FP32
-        BLKQ,                       // BLKQ
-        WARPQ,                      // WARPQ
-        BLKK,                       // BLKK
-        stream_context              // stream_context
-    );
+    // Extract tensor dimensions for quantized outputs
+    int q_int8_dim[CCV_NNC_MAX_DIM_ALLOC];
+    int k_int8_dim[CCV_NNC_MAX_DIM_ALLOC];
+    int q_scale_dim[CCV_NNC_MAX_DIM_ALLOC];
+    int k_scale_dim[CCV_NNC_MAX_DIM_ALLOC];
+    ccv_nnc_tensor_view_get_dim(q_int8, q_int8_dim);
+    ccv_nnc_tensor_view_get_dim(k_int8, k_int8_dim);
+    ccv_nnc_tensor_view_get_dim(q_scale, q_scale_dim);
+    ccv_nnc_tensor_view_get_dim(k_scale, k_scale_dim);
 
-    if (result != CCV_NNC_EXEC_SUCCESS) {
-        return CCV_NNC_EXEC_INVALID;
+    
+    printf("DEBUG: SageAttention configuration:\n");
+    printf("  Head dimension: %d\n", D);
+    printf("  Accumulation type: %s\n", pv_accum_dtype == DTYPE_FP32 ? "DTYPE_FP32" : "DTYPE_FP16_MIX_FP32");
+    printf("  WARPQ: %d\n", WARPQ);
+    // Extract tensor strides
+    int qstride[CCV_NNC_MAX_DIM_ALLOC];
+    int kstride[CCV_NNC_MAX_DIM_ALLOC];
+    int vstride[CCV_NNC_MAX_DIM_ALLOC];
+    int ostride[CCV_NNC_MAX_DIM_ALLOC];
+    int q_int8_stride[CCV_NNC_MAX_DIM_ALLOC];
+    int k_int8_stride[CCV_NNC_MAX_DIM_ALLOC];
+    int q_scale_stride[CCV_NNC_MAX_DIM_ALLOC];
+    int k_scale_stride[CCV_NNC_MAX_DIM_ALLOC];
+    
+    ccv_nnc_tensor_view_get_stride(q, qstride);
+    ccv_nnc_tensor_view_get_stride(k, kstride);
+    ccv_nnc_tensor_view_get_stride(v, vstride);
+    ccv_nnc_tensor_view_get_stride(o, ostride);
+    ccv_nnc_tensor_view_get_stride(q_int8, q_int8_stride);
+    ccv_nnc_tensor_view_get_stride(k_int8, k_int8_stride);
+    ccv_nnc_tensor_view_get_stride(q_scale, q_scale_stride);
+    ccv_nnc_tensor_view_get_stride(k_scale, k_scale_stride);
+
+    // Handle optional k_mean tensor
+    int km_dim[CCV_NNC_MAX_DIM_ALLOC];
+    int km_stride[CCV_NNC_MAX_DIM_ALLOC];
+    if (k_mean) {
+        ccv_nnc_tensor_view_get_dim(k_mean, km_dim);
+        ccv_nnc_tensor_view_get_stride(k_mean, km_stride);
     }
 
+    // Get CUDA stream
+    cudaStream_t cuda_stream = ccv_nnc_stream_context_get_stream(stream_context);
+
+    // Call direct function
+    ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
+        (half*)q->data.f16,           // query data
+        (half*)k->data.f16,           // key data
+        k_mean ? (half*)k_mean_tensor->data.f16 : NULL, // k_mean data (optional)
+        (half*)v->data.f16,           // value data
+        (int8_t*)q_int8->data.u8,     // q_int8 output data
+        (int8_t*)k_int8->data.u8,     // k_int8 output data
+        (float*)q_scale->data.f32,    // query_scale data
+        (float*)k_scale->data.f32,    // key_scale data
+        (half*)o->data.f16,           // output data
+        qdim,                         // query dimensions
+        kdim,                         // key dimensions
+        vdim,                         // value dimensions
+        odim,                         // output dimensions
+        q_int8_dim,                   // q_int8 dimensions
+        k_int8_dim,                   // k_int8 dimensions
+        q_scale_dim,                  // query_scale dimensions
+        k_scale_dim,                  // key_scale dimensions
+        qstride,                      // query strides
+        kstride,                      // key strides
+        vstride,                      // value strides
+        ostride,                      // output strides
+        q_int8_stride,                // q_int8 strides
+        k_int8_stride,                // k_int8 strides
+        q_scale_stride,               // query_scale strides
+        k_scale_stride,               // key_scale strides
+        tensor_layout,                // tensor_layout: 1=HND
+        is_causal,                    // is_causal
+        qk_quant_gran,                // qk_quant_gran: 2=per_warp
+        sm_scale,                     // sm_scale
+        return_lse,                   // return_lse
+        (int)pv_accum_dtype,          // pv_accum_dtype: FP32
+        BLKQ,                         // BLKQ
+        WARPQ,                        // WARPQ
+        BLKK,                         // BLKK
+        k_mean ? km_dim : NULL,       // k_mean dimensions (optional)
+        k_mean ? km_stride : NULL,    // k_mean strides (optional)
+        cuda_stream                   // CUDA stream
+    );
+
     CUDA_ENFORCE(cudaGetLastError());
+
+          // Clean up internal tensors
+      ccv_nnc_tensor_free(q_int8_tensor);
+      ccv_nnc_tensor_free(k_int8_tensor);
+      ccv_nnc_tensor_free(q_scale_tensor);
+      ccv_nnc_tensor_free(k_scale_tensor);
+      ccv_nnc_tensor_free(k_mean_tensor);
+
     return CCV_NNC_EXEC_SUCCESS;
 }
 
