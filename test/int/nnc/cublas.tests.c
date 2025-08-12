@@ -9067,7 +9067,8 @@ TEST_CASE("scaled dot product attention with sage_attn")
 		int Hq_candidates[num_trials] = {   8,  8, 8, 8, 8, 32 };
 		int Hk_candidates[num_trials] = {   8,  8, 8, 8, 2, 8 };
 		int D_candidates[num_trials] = {  64, 128, 128, 64, 64, 128 };  // Changed to only use supported dimensions
-		int is_causal_candidates[num_trials] = {  0, 0, 0, 0, 0, 0 };
+		// int is_causal_candidates[num_trials] = {  0, 0, 0, 0, 0, 0 };
+		int is_causal_candidates[num_trials] = {  1, 0, 1, 1, 0, 1 };
 
 		int B = B_candidates[trial];
 		int R = R_candidates[trial];
@@ -9606,21 +9607,21 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct asymmetric test")
 	
 	// Use asymmetric attention dimensions (R≠C) like the failing test
 	int B = 1, R = 160, C = 128, H = 8, D = 64;  // Same as failing trial 0 but smaller batch
-	int is_causal = 0;  // Enable causal masking like the failing test
+	int is_causal = 1;  // Enable causal masking like the failing test
 	float sm_scale = 1.0f / sqrtf((float)D);  // 0.125
 	
 	printf("Test dimensions: B=%d, R=%d, C=%d, H=%d, D=%d, causal=%d\n", B, R, C, H, D, is_causal);
 	printf("Scale: %f\n", sm_scale);
 	
 	// Generate test data with the same pattern as the failing test
-	printf("Generating synthetic test data with sawtooth pattern...\n");
+	printf("Generating synthetic test data with FlashAttention pattern for numerical stability...\n");
 	
 	// Allocate host memory for FP16 input data
 	__fp16* q_fp16_data = (__fp16*)malloc(B * R * H * D * sizeof(__fp16));
 	__fp16* k_fp16_data = (__fp16*)malloc(B * C * H * D * sizeof(__fp16));
 	__fp16* v_fp16_data = (__fp16*)malloc(B * C * H * D * sizeof(__fp16));
 	
-	// Generate the same synthetic data pattern as the failing test
+	// Use FlashAttention test data pattern for numerical stability
 	for (int i = 0; i < B * R * H * D; ++i) {
 		float val = ((float)(i % 1000) / 1000.0f) * 6.0f - 3.0f; // Range: -3 to +3
 		q_fp16_data[i] = (__fp16)val;
@@ -9933,6 +9934,6 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct asymmetric test")
 #endif
 	
 	printf("✅ CCV SageAttention direct function asymmetric test completed!\n");
-}	
+}
 
 #include "case_main.h"
