@@ -1209,10 +1209,34 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     } else if (q_nd == 4) {
         batch_size = qdim[0];
         assert(batch_size == kdim[0]);
-        R = qdim[2];
-        C = kdim[2];
-        Hq = qdim[1];
-        Hk = kdim[1];
+        
+        // Auto-detect tensor layout based on which interpretation makes more sense
+        // NHD: [batch, seq, heads, dim] - qdim[1] should be large (seq_len), qdim[2] small (num_heads)  
+        // HND: [batch, heads, seq, dim] - qdim[1] should be small (num_heads), qdim[2] large (seq_len)
+        
+        bool is_nhd_layout = false;
+        // Heuristic: if dim[1] > dim[2], likely NHD layout (seq_len > num_heads)
+        // In practice: seq_len=64, num_heads=8, so 64 > 8 indicates NHD
+        if (qdim[1] > qdim[2] && kdim[1] > kdim[2]) {
+            is_nhd_layout = true;
+        }
+        
+        if (is_nhd_layout) {
+            // NHD layout: [batch, seq, heads, dim]
+            R = qdim[1];   // sequence length
+            C = kdim[1];   // sequence length  
+            Hq = qdim[2];  // num heads
+            Hk = kdim[2];  // num heads
+            printf("DEBUG: Detected NHD layout\n");
+        } else {
+            // HND layout: [batch, heads, seq, dim]  
+            Hq = qdim[1];  // num heads
+            Hk = kdim[1];  // num heads
+            R = qdim[2];   // sequence length
+            C = kdim[2];   // sequence length
+            printf("DEBUG: Detected HND layout\n");
+        }
+        
         assert(Hq >= Hk);
         assert(Hq % Hk == 0);
         D = qdim[3];
@@ -1222,6 +1246,9 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
              batch_size, R, C, Hq, Hk, D);
 
     }
+
+    // Store the detected layout for later use (must be outside the if block)
+    const bool detected_nhd_layout = (q_nd == 4) ? (qdim[1] > qdim[2] && kdim[1] > kdim[2]) : false;
 
     // Check if tensors are in the correct data type
     const int is_same_dtype =
@@ -1248,8 +1275,8 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     if (cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U_32F) {
         pv_accum_dtype = DTYPE_FP32;
     } else {
-        // default using mix
-        pv_accum_dtype = DTYPE_FP16_MIX_FP32;
+        // Default to FP32 accumulation to match PyTorch SageAttention behavior
+        pv_accum_dtype = DTYPE_FP32;
     }
 
     int WARPQ;    
@@ -1271,13 +1298,26 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     printf("  R=%d, BLKQ=%d, WARPQ=%d\n", R, BLKQ, WARPQ);
     printf("  q_blocks=%zu, warps_per_block=%zu\n", q_blocks, warps_per_block);
     printf("  q_scale_blocks=%d, k_scale_blocks=%d\n", q_scale_blocks, k_scale_blocks);
-    // Create internal quantization tensors on GPU
-    ccv_nnc_tensor_t* q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hq, R, D), 0);
-    ccv_nnc_tensor_t* k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hk, C, D), 0);
+    // Create internal quantization tensors on GPU matching the detected layout
+    ccv_nnc_tensor_t* q_int8_tensor;
+    ccv_nnc_tensor_t* k_int8_tensor;
+    
+    if (detected_nhd_layout) {
+        // NHD layout: [batch, seq, heads, dim]
+        q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, R, Hq, D), 0);
+        k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, C, Hk, D), 0);
+    } else {
+        // HND layout: [batch, heads, seq, dim]
+        q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hq, R, D), 0);
+        k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, Hk, C, D), 0);
+    }
+    
+    // Scale tensors are always [batch, heads, scale_blocks] regardless of input layout
     ccv_nnc_tensor_t* q_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hq, q_scale_blocks), 0);
     ccv_nnc_tensor_t* k_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hk, k_scale_blocks), 0);
+    // K mean tensor is [batch, heads, dim] regardless of layout
     ccv_nnc_tensor_t* k_mean_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, batch_size, Hk, D), 0);
-    
+
     // Initialize k_mean to zeros
       CUDA_ENFORCE(cudaMemsetAsync(k_mean_tensor->data.u8, 0,
           ccv_nnc_tensor_count(k_mean_tensor->info) * sizeof(half),
@@ -1291,8 +1331,8 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
 
 
     // Call SageAttention with proper parameters
-    // tensor_layout: 1 for HND (batch, heads, seq, dim) - CCV uses NHWC which maps to HND
-    const int tensor_layout = 1; // HND layout
+    // tensor_layout: 0 for NHD (batch, seq, heads, dim), 1 for HND (batch, heads, seq, dim)
+    const int tensor_layout = detected_nhd_layout ? 0 : 1;
     const int is_causal = cmd.info.scaled_dot_product_attention.is_causal;
     const int qk_quant_gran = 2; // per_warp quantization
     const float sm_scale = 1.0f / sqrtf((float)D); // scale = 1.0 / sqrt(head_dim)
@@ -1308,6 +1348,11 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
     ccv_nnc_tensor_view_get_dim(q_scale, q_scale_dim);
     ccv_nnc_tensor_view_get_dim(k_scale, k_scale_dim);
 
+    printf("DEBUG: Internal tensor dimensions:\n");
+    printf("  q_int8: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
+    printf("  k_int8: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
+    printf("  q_scale: [%d, %d, %d, %d]\n", q_scale_dim[0], q_scale_dim[1], q_scale_dim[2], q_scale_dim[3]);
+    printf("  k_scale: [%d, %d, %d, %d]\n", k_scale_dim[0], k_scale_dim[1], k_scale_dim[2], k_scale_dim[3]);
     
     printf("DEBUG: SageAttention configuration:\n");
     printf("  Head dimension: %d\n", D);

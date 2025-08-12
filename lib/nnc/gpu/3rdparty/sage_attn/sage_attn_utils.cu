@@ -147,11 +147,15 @@ extern "C" void ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct(
             dim3 grid_dim((seq_len + CTA_Q - 1) / CTA_Q, num_heads, batch_size);
             dim3 block_dim(32, (CTA_Q / WARP_Q) * (CTA_K / WARP_K));
             
-            // Direct kernel call using the exact same template as the working function
-            qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, 
+            // Set the shared memory size attribute for the kernel
+            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, 
                 DataType::kInt8, QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
-                float, false, half, ComputeUnit::kTensorCore, mask_mode, false, false>
-            <<<grid_dim, block_dim, smem_max>>>(
+                float, false, half, ComputeUnit::kTensorCore, mask_mode, false, false>;
+            
+            cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
+            
+            // Direct kernel call using the exact same template as the working function
+            kernel_func<<<grid_dim, block_dim, smem_max>>>(
                 Q, K, V, O,
                 nullptr,  // Lse (not used when return_lse=false)
                 Q_scale, K_scale,
@@ -417,6 +421,8 @@ extern "C" void ccv_nnc_quant_per_warp_int8_cuda_direct(
             printf("Grid: (%d, %d, %d), Block: (%d, 1)\n", 
                    grid_dim.x, grid_dim.y, grid_dim.z, block_dim.x);
             printf("Using QuantInt8Kernel<HEAD_DIM=%d, WARP_BLOCK_SIZE=%d>\n", HEAD_DIM, WARP_BLOCK_SIZE);
+            printf("Input strides: bz=%d, seq=%d, h=%d\n", stride_bz_input, stride_seq_input, stride_h_input);
+            printf("Output strides: bz=%d, seq=%d, h=%d\n", stride_bz_output, stride_seq_output, stride_h_output);
             printf("Scale strides: bz=%d, h=%d\n", stride_scale_bz, stride_scale_h);
             
             QuantInt8Kernel<HEAD_DIM, WARP_BLOCK_SIZE, num_pack_per_thread, false, false, half>
