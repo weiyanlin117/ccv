@@ -102,13 +102,7 @@ extern "C" void ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct(
     constexpr uint32_t CTA_Q = 128;
     constexpr uint32_t CTA_K = 64;
     constexpr uint32_t WARP_K = 64;
-    
-    // Print debug info
-    printf("\n=== ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct ===\n");
-    printf("Dimensions: B=%d, H=%d, S=%d, D=%d, H_kv=%d, S_kv=%d\n", 
-           batch_size, num_heads, seq_len, head_dim, num_kv_heads, kv_len);
-    printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
-    
+     
     // Launch kernel based on parameters with proper WARP_Q dispatch
     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
         // WARP_Q depends on HEAD_DIM for FP32 accumulation
@@ -123,13 +117,6 @@ extern "C" void ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct(
         // Grid and block dimensions
         dim3 grid_dim((seq_len + CTA_Q - 1) / CTA_Q, num_heads, batch_size);
         dim3 block_dim(32, (CTA_Q / WARP_Q) * (CTA_K / WARP_K));
-        
-        printf("Grid: (%d, %d, %d), Block: (%d, %d)\n", 
-               grid_dim.x, grid_dim.y, grid_dim.z, block_dim.x, block_dim.y);
-        printf("Template params: CTA_Q=%d, CTA_K=%d, WARP_Q=%d, WARP_K=%d, HEAD_DIM=%d\n", 
-               CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM);
-        printf("Shared memory: %zu bytes\n", smem_max);
-        printf("Accumulation: FP32, use_inst_buffer: false\n");
         
         DISPATCH_CAUSAL(is_causal, IS_CAUSAL, {
             // Use the exact same template instantiation pattern as ccv_nnc_qk_int8_sv_f16_accum_f32_attn
@@ -267,12 +254,6 @@ extern "C" void qk_int8_sv_f16_accum_f16_attn_inst_buf_direct(
     constexpr uint32_t CTA_K = 64;
     constexpr uint32_t WARP_K = 64;
     
-    // Print debug info
-    printf("\n=== qk_int8_sv_f16_accum_f16_attn_inst_buf_direct ===\n");
-    printf("Dimensions: B=%d, H=%d, S=%d, D=%d, H_kv=%d, S_kv=%d\n", 
-           batch_size, num_heads, seq_len, head_dim, num_kv_heads, kv_len);
-    printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
-    
     // Launch kernel based on parameters with proper WARP_Q dispatch
     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
         // WARP_Q depends on HEAD_DIM
@@ -287,12 +268,6 @@ extern "C" void qk_int8_sv_f16_accum_f16_attn_inst_buf_direct(
         // Grid and block dimensions
         dim3 grid_dim((seq_len + CTA_Q - 1) / CTA_Q, num_heads, batch_size);
         dim3 block_dim(32, (CTA_Q / WARP_Q) * (CTA_K / WARP_K));
-        
-        printf("Grid: (%d, %d, %d), Block: (%d, %d)\n", 
-               grid_dim.x, grid_dim.y, grid_dim.z, block_dim.x, block_dim.y);
-        printf("Template params: CTA_Q=%d, CTA_K=%d, WARP_Q=%d, WARP_K=%d, HEAD_DIM=%d\n", 
-               CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM);
-        printf("Shared memory: %zu bytes\n", smem_max);
         
         DISPATCH_CAUSAL(is_causal, IS_CAUSAL, {
             DISPATCH_QK_QUANT_GRAN(qk_quant_gran, QK_QUANT_GRAN, {
@@ -361,10 +336,6 @@ extern "C" void ccv_nnc_quant_per_warp_int8_cuda_direct(
     assert(block_size == 128 || block_size == 64);
     assert(warp_block_size == 16 || warp_block_size == 32);
     
-    printf("\n=== ccv_nnc_quant_per_warp_int8_cuda_direct ===\n");
-    printf("Block size: %d, Warp block size: %d\n", block_size, warp_block_size);
-    printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
-    
     // Extract dimensions
     int batch_size, seq_len, num_heads, head_dim;
     if (tensor_layout == 1) { // HND layout
@@ -378,9 +349,7 @@ extern "C" void ccv_nnc_quant_per_warp_int8_cuda_direct(
         num_heads = input_dim[2];
         head_dim = input_dim[3];
     }
-    
-    printf("Dimensions: B=%d, H=%d, S=%d, D=%d\n", batch_size, num_heads, seq_len, head_dim);
-    
+        
     // Extract input strides
     uint32_t stride_bz_input, stride_seq_input, stride_h_input;
     if (tensor_layout == 1) { // HND layout
@@ -417,13 +386,6 @@ extern "C" void ccv_nnc_quant_per_warp_int8_cuda_direct(
             constexpr int num_pack_per_thread = (WARP_BLOCK_SIZE * (HEAD_DIM / 8) + 1023) / 1024;
             dim3 grid_dim(DIV_CEIL(seq_len, WARP_BLOCK_SIZE), num_heads, batch_size);
             dim3 block_dim(WARP_BLOCK_SIZE * (HEAD_DIM / 8) / num_pack_per_thread);
-            
-            printf("Grid: (%d, %d, %d), Block: (%d, 1)\n", 
-                   grid_dim.x, grid_dim.y, grid_dim.z, block_dim.x);
-            printf("Using QuantInt8Kernel<HEAD_DIM=%d, WARP_BLOCK_SIZE=%d>\n", HEAD_DIM, WARP_BLOCK_SIZE);
-            printf("Input strides: bz=%d, seq=%d, h=%d\n", stride_bz_input, stride_seq_input, stride_h_input);
-            printf("Output strides: bz=%d, seq=%d, h=%d\n", stride_bz_output, stride_seq_output, stride_h_output);
-            printf("Scale strides: bz=%d, h=%d\n", stride_scale_bz, stride_scale_h);
             
             QuantInt8Kernel<HEAD_DIM, WARP_BLOCK_SIZE, num_pack_per_thread, false, false, half>
             <<<grid_dim, block_dim, 0, cuda_stream>>>(
@@ -467,10 +429,6 @@ extern "C" void ccv_nnc_quant_per_block_int8_cuda_direct(
     assert(input && output && scale);
     assert(block_size == 128 || block_size == 64);
     
-    printf("\n=== ccv_nnc_quant_per_block_int8_cuda_direct ===\n");
-    printf("Block size: %d\n", block_size);
-    printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
-    
     // Extract dimensions
     int batch_size, seq_len, num_heads, head_dim;
     if (tensor_layout == 1) { // HND layout
@@ -484,8 +442,6 @@ extern "C" void ccv_nnc_quant_per_block_int8_cuda_direct(
         num_heads = input_dim[2];
         head_dim = input_dim[3];
     }
-    
-    printf("Dimensions: B=%d, H=%d, S=%d, D=%d\n", batch_size, num_heads, seq_len, head_dim);
     
     // Extract input strides
     uint32_t stride_bz_input, stride_seq_input, stride_h_input;
@@ -523,11 +479,6 @@ extern "C" void ccv_nnc_quant_per_block_int8_cuda_direct(
             int num_blocks = DIV_CEIL(seq_len, BLOCK_SIZE);
             dim3 grid_dim(num_blocks, num_heads, batch_size);
             dim3 block_dim(BLOCK_SIZE * (HEAD_DIM / 8) / num_pack_per_thread);
-            
-            printf("Grid: (%d, %d, %d), Block: (%d, 1)\n", 
-                   grid_dim.x, grid_dim.y, grid_dim.z, block_dim.x);
-            printf("Using QuantInt8Kernel<HEAD_DIM=%d, BLOCK_SIZE=%d>\n", HEAD_DIM, BLOCK_SIZE);
-            printf("Scale strides: bz=%d, h=%d\n", stride_scale_bz, stride_scale_h);
             
             QuantInt8Kernel<HEAD_DIM, BLOCK_SIZE, num_pack_per_thread, false, false, half>
             <<<grid_dim, block_dim, 0, cuda_stream>>>(
@@ -574,10 +525,6 @@ extern "C" void ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda_direct(
     assert(input && mean && output && scale);
     assert(block_size == 128 || block_size == 64);
     
-    printf("\n=== ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda_direct ===\n");
-    printf("Block size: %d\n", block_size);
-    printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
-    
     // Extract dimensions
     int batch_size, seq_len, num_heads, head_dim;
     if (tensor_layout == 1) { // HND layout
@@ -591,9 +538,7 @@ extern "C" void ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda_direct(
         num_heads = input_dim[2];
         head_dim = input_dim[3];
     }
-    
-    printf("Dimensions: B=%d, H=%d, S=%d, D=%d\n", batch_size, num_heads, seq_len, head_dim);
-    
+        
     // Extract input strides
     uint32_t stride_bz_input, stride_seq_input, stride_h_input;
     uint32_t mean_stride_bz, mean_stride_h;
@@ -638,11 +583,6 @@ extern "C" void ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda_direct(
             int num_blocks = DIV_CEIL(seq_len, BLOCK_SIZE);
             dim3 grid_dim(num_blocks, num_heads, batch_size);
             dim3 block_dim(BLOCK_SIZE * (HEAD_DIM / 8) / num_pack_per_thread);
-            
-            printf("Grid: (%d, %d, %d), Block: (%d, 1)\n", 
-                   grid_dim.x, grid_dim.y, grid_dim.z, block_dim.x);
-            printf("Using QuantInt8Kernel<HEAD_DIM=%d, BLOCK_SIZE=%d> with mean subtraction\n", HEAD_DIM, BLOCK_SIZE);
-            printf("Scale strides: bz=%d, h=%d\n", stride_scale_bz, stride_scale_h);
             
             QuantInt8Kernel<HEAD_DIM, BLOCK_SIZE, num_pack_per_thread, false, true, half>
             <<<grid_dim, block_dim, 0, cuda_stream>>>(
@@ -699,12 +639,7 @@ extern "C" void ccv_nnc_per_warp_int8_direct(
     // Validate inputs
     assert(q && k && q_int8 && k_int8 && q_scale && k_scale);
     
-    printf("\n=== ccv_nnc_per_warp_int8_direct ===\n");
-    printf("Block sizes: Q=%d (warp=%d), K=%d\n", BLKQ, WARPQ, BLKK);
-    printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
-    
     // Quantize Q using per-warp quantization
-    printf("Quantizing Q (per-warp)...\n");
     ccv_nnc_quant_per_warp_int8_cuda_direct(
         q, q_int8, q_scale,
         qdim, q_int8_dim, q_scale_dim,
@@ -713,7 +648,6 @@ extern "C" void ccv_nnc_per_warp_int8_direct(
     );
     
     // Quantize K using per-block quantization (with or without mean subtraction)
-    printf("Quantizing K (per-block)...\n");
     if (km != NULL) {
         // Use mean subtraction version
         ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda_direct(
@@ -732,7 +666,6 @@ extern "C" void ccv_nnc_per_warp_int8_direct(
         );
     }
     
-    printf("✓ ccv_nnc_per_warp_int8_direct completed\n");
 }
 
 extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
@@ -777,15 +710,7 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
     // Validate inputs
     assert(query && key && value && q_int8 && k_int8 && query_scale && key_scale && output);
     
-    printf("\n=== ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct ===\n");
-    printf("Block sizes: Q=%d (warp=%d), K=%d\n", BLKQ, WARPQ, BLKK);
-    printf("Tensor layout: %d (%s)\n", tensor_layout, tensor_layout == 1 ? "HND" : "NHD");
-    printf("Causal: %s, QK quant gran: %d, SM scale: %f\n", is_causal ? "true" : "false", qk_quant_gran, sm_scale);
-    printf("PV accum dtype: %d (%s)\n", pv_accum_dtype, 
-           pv_accum_dtype == 0 ? "FP16" : (pv_accum_dtype == 1 ? "FP16_MIX_FP32" : "FP32"));
-    
     // Step 1: Quantize Q and K tensors using per-warp quantization
-    printf("Step 1: Quantizing Q and K tensors...\n");
     ccv_nnc_per_warp_int8_direct(
         query, key,                    // Input Q and K tensors
         q_int8, k_int8,               // Output quantized tensors
@@ -803,72 +728,13 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
         tensor_layout,                // Tensor layout
         cuda_stream                   // CUDA stream
     );
-    
-    // Debug: Print quantized outputs after quantization
-    printf("\n=== After Quantization (Debug) ===\n");
-    
+        
     // Copy quantized data back to CPU for inspection
     int total_elements = qdim[0] * qdim[1] * qdim[2] * qdim[3];
     int8_t* temp_q_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
     int8_t* temp_k_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
-    
-    cudaMemcpy(temp_q_int8, q_int8, total_elements * sizeof(int8_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(temp_k_int8, k_int8, total_elements * sizeof(int8_t), cudaMemcpyDeviceToHost);
-    
-    printf("Q_int8 first 10 values: ");
-    for (int i = 0; i < 10; i++) {
-        printf("%d ", temp_q_int8[i]);
-    }
-    printf("\n");
-    
-    printf("K_int8 first 10 values: ");
-    for (int i = 0; i < 10; i++) {
-        printf("%d ", temp_k_int8[i]);
-    }
-    printf("\n");
-    
-    // Copy scales back to CPU
-    int q_scale_total = query_scale_dim[0] * query_scale_dim[1] * query_scale_dim[2];
-    int k_scale_total = key_scale_dim[0] * key_scale_dim[1] * key_scale_dim[2];
-    float* temp_q_scale = (float*)malloc(q_scale_total * sizeof(float));
-    float* temp_k_scale = (float*)malloc(k_scale_total * sizeof(float));
-    
-    cudaMemcpy(temp_q_scale, query_scale, q_scale_total * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(temp_k_scale, key_scale, k_scale_total * sizeof(float), cudaMemcpyDeviceToHost);
-    
-    printf("Q_scale dimensions: [%d, %d, %d]\n", 
-           query_scale_dim[0], query_scale_dim[1], query_scale_dim[2]);
-    printf("Q_scale all %d values: ", q_scale_total);
-    for (int i = 0; i < q_scale_total; i++) {
-        printf("%.6f ", temp_q_scale[i]);
-    }
-    printf("\n");
-    
-    printf("K_scale dimensions: [%d, %d, %d]\n", 
-           key_scale_dim[0], key_scale_dim[1], key_scale_dim[2]);
-    printf("K_scale all %d values: ", k_scale_total);
-    for (int i = 0; i < k_scale_total; i++) {
-        printf("%.6f ", temp_k_scale[i]);
-    }
-    printf("\n");
-    
-    // Print scale strides for debugging
-    printf("Q_scale strides passed to attention: [%d, %d, %d, %d]\n", 
-           query_scale_stride[0], query_scale_stride[1], query_scale_stride[2], 
-           (query_scale_stride[3] ? query_scale_stride[3] : -1));
-    printf("K_scale strides passed to attention: [%d, %d, %d, %d]\n", 
-           key_scale_stride[0], key_scale_stride[1], key_scale_stride[2],
-           (key_scale_stride[3] ? key_scale_stride[3] : -1));
-    
-    free(temp_q_int8);
-    free(temp_k_int8);
-    free(temp_q_scale);
-    free(temp_k_scale);
-    
-    printf("=== End Debug ===\n\n");
-    
+        
     // Step 2: Perform quantized attention computation
-    printf("Step 2: Computing quantized attention...\n");
     if (pv_accum_dtype == 2) { // DTYPE_FP32
         ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct(
             q_int8, k_int8, value, output,      // Q, K, V, O tensors
@@ -898,17 +764,15 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
             return_lse                         // Return LSE (not used)
         );
     } else {
-        printf("ERROR: Unsupported pv_accum_dtype: %d\n", pv_accum_dtype);
+        fprintf(stderr, "ERROR: Unsupported pv_accum_dtype: %d\n", pv_accum_dtype);
         return;
     }
     
     // Check for CUDA errors
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
-        printf("ERROR: ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct failed: %s\n", 
+        fprintf(stderr, "ERROR: ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct failed: %s\n", 
                cudaGetErrorString(error));
         return;
     }
-    
-    printf("✓ ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct completed successfully\n");
 }

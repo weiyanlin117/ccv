@@ -12,6 +12,9 @@ extern "C" {
 
 static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
 {
+	fprintf(stderr, "\n OLD _ccv_nnc_scaled_dot_product_attention_forw\n");
+	fflush(stdout);
+
 	// NNC notation:
 	// C = sm(Q * K^T) * V
 	//
@@ -82,7 +85,7 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
 		Hq = Hk = 1;
 		D = qdim[3];
 		assert(D == kdim[3]);
-	} else if (q_nd == 4) {
+	} else if (q_nd == 4) {  // B S H D
 		batch_size = qdim[0];
 		assert(batch_size == kdim[0]);
 		R = qdim[1];
@@ -452,6 +455,8 @@ static int _ccv_nnc_scaled_dot_product_attention_back(const ccv_nnc_cmd_t cmd, c
 
 #endif
 
+
+/*
 REGISTER_COMMAND_BACKEND(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 #ifdef HAVE_CUDA_SM80
@@ -462,7 +467,11 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_B
 	registry->exec = _ccv_nnc_scaled_dot_product_attention_forw;
 #endif
 }
+*/
 
+
+
+/*
 REGISTER_COMMAND_BACKEND(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD, CCV_NNC_BACKEND_GPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 #ifdef HAVE_CUDA_SM80
@@ -473,3 +482,5 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD, CCV_NNC_
 	registry->exec = _ccv_nnc_scaled_dot_product_attention_back;
 #endif
 }
+*/
+

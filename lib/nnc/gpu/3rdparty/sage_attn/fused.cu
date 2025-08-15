@@ -133,12 +133,6 @@ __global__ void QuantInt8Kernel(T *__restrict__ input, T *__restrict__ mean, int
         x_val_float[i][j] = convert_to_float(x_val[i][j]);
       }
       
-      // Debug output for various threads/elements to see value distribution
-      if (batch_id == 0 && head_id == 0 && bx == 0 && i == 0 && (thread_id % 64 == 0 || thread_id % 64 == 32)) {
-        uint64_t input_offset = batch_id * stride_bz_input + head_id * stride_h_input + thread_base_token * stride_seq_input + thread_id % num_threads_per_token * pack_size;
-        printf("DEBUG QuantInt8Kernel thread_id=%d: input_offset=%lu, values: %f %f %f %f\n", 
-               thread_id, input_offset, x_val_float[i][0], x_val_float[i][1], x_val_float[i][2], x_val_float[i][3]);
-      }
 
       if constexpr (sub_mean)
       {
@@ -186,11 +180,6 @@ __global__ void QuantInt8Kernel(T *__restrict__ input, T *__restrict__ mean, int
     s_amax = block_amax_val;
     scale_ptr_base[0] = s_amax / 127.0f;
     
-    // Debug output for the first few blocks
-    if (batch_id == 0 && head_id == 0 && bx < 2) {
-      printf("DEBUG QuantInt8Kernel: batch=%d, head=%d, block=%d, amax=%f, scale=%f\n", 
-             batch_id, head_id, bx, s_amax, scale_ptr_base[0]);
-    }
   }
   __syncthreads();
 
@@ -218,11 +207,6 @@ __global__ void QuantInt8Kernel(T *__restrict__ input, T *__restrict__ mean, int
   {
     if (thread_base_token + i * iter_stride < num_tokens)
     {
-      // Debug output for various threads to see INT8 distribution  
-      if (batch_id == 0 && head_id == 0 && bx == 0 && i == 0 && (thread_id % 64 == 0 || thread_id % 64 == 32)) {
-        printf("DEBUG QuantInt8Kernel thread_id=%d write: tmp_scale=%f, int8 values: %d %d %d %d\n", 
-               thread_id, tmp_scale, (int)o_val[i][0].x, (int)o_val[i][0].y, (int)o_val[i][0].z, (int)o_val[i][0].w);
-      }
       
       *reinterpret_cast<float2*>(output_ptr_base + i * iter_stride * stride_seq_output) = *reinterpret_cast<float2*>(&o_val[i][0]);
     }
