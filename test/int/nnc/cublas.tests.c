@@ -1,42 +1,10 @@
 #include "case.h"
-#ifdef HAVE_CUDA
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
-#endif
 #include "ccv_case.h"
-#include "nnc/ccv_nnc_internal.h"
 #include "ccv_nnc_case.h"
 #include <ccv.h>
 #include <nnc/ccv_nnc.h>
 #include <nnc/ccv_nnc_easy.h>
 #include <3rdparty/dsfmt/dSFMT.h>
-// Forward declarations for the CUDA functions
-extern void qk_int8_sv_f16_accum_f16_attn_inst_buf_direct(
-    int8_t *Q, int8_t *K, __fp16 *V, __fp16 *O,
-    float *Q_scale, float *K_scale,
-    int qdim[], int kdim[], int vdim[], int odim[], 
-    int qscale_dim[], int kscale_dim[],
-    int qstride[], int kstride[], int vstride[], int ostride[],
-    int qscale_stride[], int kscale_stride[],
-    int tensor_layout,
-    int is_causal,
-    int qk_quant_gran,
-    float sm_scale,
-    int return_lse);
-
-extern void ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct(
-    int8_t *Q, int8_t *K, __fp16 *V, __fp16 *O,
-    float *Q_scale, float *K_scale,
-    int qdim[], int kdim[], int vdim[], int odim[], 
-    int qscale_dim[], int kscale_dim[],
-    int qstride[], int kstride[], int vstride[], int ostride[],
-    int qscale_stride[], int kscale_stride[],
-    int tensor_layout,
-    int is_causal,
-    int qk_quant_gran,
-    float sm_scale,
-    int return_lse);
-
 
 TEST_SETUP()
 {

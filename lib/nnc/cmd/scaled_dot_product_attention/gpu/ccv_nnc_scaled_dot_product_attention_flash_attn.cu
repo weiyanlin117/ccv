@@ -9,13 +9,7 @@ extern "C" {
 
 #ifdef HAVE_CUDA_SM80
 #include <nnc/gpu/3rdparty/flash_attn/flash_api.h>
-// SageAttention headers for INT8 quantized attention
-#include <algorithm>  // for std::max
-#include <vector>     // for std::vector
-#include "math.cuh"
-#include "qattn/attn_utils.cuh"
 #include "fused.h"
-#include "qattn/qk_int_sv_f16_cuda_sm80_kernel_only.cuh"
 #include "sage_attn_utils.cuh"
 
 // SageAttention wrapper function for INT8 quantized attention
