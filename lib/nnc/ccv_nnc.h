@@ -103,6 +103,8 @@ enum {
 	CCV_NNC_GEMM_32F = 0x1, /**< For GEMM (or similar op), whether prefer to use FP32 for accumulator. */
 	CCV_NNC_GEMM_32TF = 0x2, /**< For GEMM (or similar op), whether prefer to use TF32 for accumulator. */
 	CCV_NNC_GEMM_16F = 0x4, /**< For GEMM (or similar op), whether prefer to use FP16 for accumulator. */
+	CCV_NNC_GEMM_8U = 0x8,  /**< For GEMM (or similar op), use INT8 quantization with FP16 accumulator . */
+	CCV_NNC_GEMM_8U_32F = 0x10,   /**< For GEMM (or similar op), use INT8 quantization with FP32 accumulator. */
 };
 
 /**

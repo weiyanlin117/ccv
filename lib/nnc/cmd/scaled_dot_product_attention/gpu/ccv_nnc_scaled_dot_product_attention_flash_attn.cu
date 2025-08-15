@@ -158,8 +158,7 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	ccv_nnc_tensor_t* k_mean_tensor_4d = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, batch_size, 1, Hk, D), 0);
 	ccv_nnc_tensor_t* k_mean_tensor_3d = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, batch_size, Hk, D), 0);
 
-	int reduce_axis = 1;
-	printf("reduce!");
+	int reduce_axis = 1; // NHD(BNHD) N is 1, HND(BHND) N is 2 
 	ccv_nnc_cmd_param_t reduce_params = {
 		.size = {.dim = {1, 1, 1}},
 		.reduce = {.axis = {reduce_axis}, .count = 1}
@@ -283,7 +282,6 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 
 static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
 {
-	printf("cmd.info.scaled_dot_product_attention.flags %d", cmd.info.scaled_dot_product_attention.flags);
 	// Check if we should use SageAttention for INT8 quantized attention
 	if ((cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U) || 
 	    (cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U_32F)) {
