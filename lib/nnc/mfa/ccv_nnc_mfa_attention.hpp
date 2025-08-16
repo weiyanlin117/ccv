@@ -2,21 +2,22 @@
 #define GUARD_ccv_nnc_mfa_attention_hpp
 
 typedef struct {
-  uint64_t data_type;
+  uint8_t Q_trans;
+  uint8_t K_trans;
+  uint8_t V_trans;
+  uint8_t O_trans;
+  uint8_t batched;
+  uint8_t masked;
+  uint8_t upcast;
+  uint8_t type;
   uint32_t R;
   uint32_t C;
   uint32_t Hq;
   uint32_t Hk;
   uint32_t D;
-  uint8_t Q_trans;
-  uint8_t K_trans;
-  uint8_t V_trans;
-  uint8_t O_trans;
   float alpha;
-  uint8_t batched;
-  uint8_t masked;
-  uint8_t upcast;
-  
+  uint64_t data_type;
+
   // Since grouped queries are not supported yet, assume Q, K, V, and O all have
   // the same batch dimensions.
   uint32_t batch_dims_q[CCV_NNC_MAX_DIM_ALLOC];
@@ -35,20 +36,21 @@ namespace attention {
 
 class hash {
 public:
-  uint64_t data_type;
+  uint8_t Q_trans;
+  uint8_t K_trans;
+  uint8_t V_trans;
+  uint8_t O_trans;
+  uint8_t batched;
+  uint8_t masked;
+  uint8_t upcast;
+  uint8_t type;
   uint32_t R;
   uint32_t C;
   uint32_t Hq;
   uint32_t Hk;
   uint32_t D;
-  uint8_t Q_trans;
-  uint8_t K_trans;
-  uint8_t V_trans;
-  uint8_t O_trans;
   float alpha;
-  uint8_t batched;
-  uint8_t masked;
-  uint8_t upcast;
+  uint64_t data_type;
   
   hash(ccv_nnc_mfa_attention_params_t);
   

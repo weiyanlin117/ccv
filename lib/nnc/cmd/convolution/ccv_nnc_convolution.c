@@ -49,7 +49,9 @@ static void _ccv_nnc_conv_tensor_auto_forw(const ccv_nnc_cmd_param_t cmd, const 
 	ccv_nnc_tensor_set_n(outputs, ccv_nnc_tensor_get_n(inputs[0]));
 	ccv_nnc_cmd_param_t modified_cmd = cmd;
 	int i = 0;
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	const int size_nd = ccv_nnc_tensor_nd(cmd.size.dim) - 1;
+	assert(size_nd == 2 || size_nd == 3); // Support 3D convolution.
+	for (i = 0; i < size_nd; i++)
 		modified_cmd.size.dim[i] = (modified_cmd.size.dim[i] - 1) * ccv_max(cmd.convolution.dilation[i], 1) + 1;
 	ccv_nnc_hint_tensor_forward(modified_cmd, inputs[0], hint, outputs);
 }
@@ -86,14 +88,17 @@ static void _ccv_nnc_conv_transpose_tensor_auto_forw(const ccv_nnc_cmd_param_t c
 	ccv_nnc_tensor_set_n(outputs, ccv_nnc_tensor_get_n(inputs[0]));
 	ccv_nnc_cmd_param_t modified_cmd = cmd;
 	int i = 0;
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	const int size_nd = ccv_nnc_tensor_nd(cmd.size.dim) - 1;
+	assert(size_nd == 2 || size_nd == 3); // Support 3D convolution.
+	for (i = 0; i < size_nd; i++)
+		modified_cmd.size.dim[i] = (modified_cmd.size.dim[i] - 1) * ccv_max(cmd.convolution.dilation[i], 1) + 1;
 	ccv_nnc_hint_tensor_forward(modified_cmd, inputs[0], hint, outputs);
 	assert(inputs[0].format == outputs[0].format);
 	const int nd = ccv_nnc_tensor_nd(inputs[0].dim);
-	assert(nd == CCV_NNC_MAX_DIM + 1 || nd == CCV_NNC_MAX_DIM + 2);
-	int hw = ccv_nnc_tensor_hw(inputs[0], nd);
+	assert(nd == size_nd + 1 || nd == size_nd + 2);
+	int hw = ccv_nnc_tensor_hw(inputs[0], nd, size_nd);
 	assert(hw >= 0);
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < size_nd; i++)
 	{
 		const int stride = ccv_max(1, hint.stride.dim[i]);
 		const int size_dim = (modified_cmd.size.dim[i] - 1) * ccv_max(cmd.convolution_transpose.dilation[i], 1) + 1;

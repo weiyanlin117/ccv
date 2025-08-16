@@ -169,7 +169,7 @@ static int _ccv_nnc_tensor_ref_fully_assigned_with_aliases(const ccv_nnc_tensor_
 	const ccv_nnc_autograd_tensor_symbol_t* autograd = (ccv_nnc_autograd_tensor_symbol_t*)ccv_array_get(autograd_tensor_symbols, tensor_ref->d);
 	assert(tensor_symbol_info[autograd->d].alias_ref == 0);
 	const int* tensor_dim = tensor_symbol_info[autograd->d].info.dim;
-	const int tensor_count = ccv_nnc_dimension_count(tensor_dim);
+	const size_t tensor_count = ccv_nnc_dimension_count(tensor_dim);
 	int i, j;
 	for (i = 0; i < tensor_ref->alias_registry->rnum; i++)
 	{

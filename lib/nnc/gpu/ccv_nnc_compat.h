@@ -33,6 +33,10 @@ typedef void(*cump_f)(int device_id, void* const context);
 int curegmp(int device_id, cump_f func, void* const context); // register memory pressure handler
 void cuunregmp(const int id); // un-register memory pressure handler.
 void cusetprofiler(int state);
+void cusetdevicemap(const int* const device_map, const int size);
+void cufileread(const int fd, const off_t file_offset, void* const buf, const size_t size);
+void* cumallocmanaged(int device, size_t size);
+void cumemadvisereadmostly(int device, void* ptr, size_t size);
 
 // Stream context
 CCV_WARN_UNUSED(ccv_nnc_stream_context_t*) ccv_nnc_init_stream_context(ccv_nnc_stream_context_t* const stream_context);
@@ -57,6 +61,7 @@ typedef struct {
 CCV_WARN_UNUSED(int) ccv_nnc_gpu_device_count(void);
 CCV_WARN_UNUSED(ccv_nnc_cuda_device_prop_t) ccv_nnc_gpu_device_props(void);
 void ccv_nnc_compat_depalettize(const void* input, const int datatype, const size_t input_length, const int qbits, const int number_in_blocks, void* output, const size_t output_length, ccv_nnc_stream_context_t* const stream_context);
+void ccv_nnc_tensor_prefetch_async(ccv_nnc_tensor_t* const tensor, const ccv_nnc_stream_context_t* const stream_context);
 #ifdef __cplusplus
 }
 #endif
@@ -91,7 +96,7 @@ void ccv_nnc_compat_depalettize(const void* input, const int datatype, const siz
 
 extern "C" {
 CCV_WARN_UNUSED(cudaDataType_t) ccv_nnc_cuda_datatype(const int datatype); // Get the datatype corresponding to cuda datatype.
-CCV_WARN_UNUSED(cublasComputeType_t) ccv_nnc_cuda_compute_datatype(const int datatype); // Get the datatype that is accurate enough to be accumulator.
+CCV_WARN_UNUSED(cublasComputeType_t) ccv_nnc_cuda_compute_datatype(int datatype, const int reduced_precision); // Get the datatype that is accurate enough to be accumulator.
 // Stream context methods to get the underlying objects, note that none of these methods are thread-safe.
 CCV_WARN_UNUSED(int) ccv_nnc_stream_context_get_device(const ccv_nnc_stream_context_t* const stream_context);
 CCV_WARN_UNUSED(cudaStream_t) ccv_nnc_stream_context_get_stream(const ccv_nnc_stream_context_t* const stream_context);
@@ -116,6 +121,20 @@ CCV_WARN_UNUSED(size_t) ccv_nnc_cublas_workspace_size_in_bytes(const ccv_nnc_ten
 		assert(0);                                              \
 		exit(EXIT_FAILURE);                                     \
 	}                                                           \
+} while (0)
+#endif
+
+#ifdef NDEBUG
+#define CUFILE_ENFORCE(status) status
+#else
+#define CUFILE_ENFORCE(status) do {                               \
+	const CUfileError_t __status = status;                        \
+	if (__status.err != CU_FILE_SUCCESS) {                        \
+		printf("[%s:%d]:CUFILE - Error: %s\n",                    \
+				__FILE__, __LINE__, CUFILE_ERRSTR(__status.err)); \
+		assert(0);                                                \
+		exit(EXIT_FAILURE);                                       \
+	}                                                             \
 } while (0)
 #endif
 

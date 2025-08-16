@@ -577,6 +577,21 @@ static void _ccv_cnnp_reshape_build(ccv_cnnp_model_t* const super, ccv_nnc_symbo
 		PRINT(CCV_CLI_VERBOSE, ")\n");
 	}
 	ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
+	int dim[CCV_NNC_MAX_DIM_ALLOC];
+	memcpy(dim, self->dim, sizeof(dim));
+	int i, auto_idx = -1;
+	size_t known = 1;
+	const size_t tensor_count = ccv_nnc_tensor_count(params);
+	for (i = 0; i < CCV_NNC_MAX_DIM_ALLOC && dim[i]; i++)
+		if (dim[i] == -1)
+			auto_idx = i;
+		else
+			known *= dim[i];
+	if (auto_idx >= 0)
+	{
+		assert(known > 0 && tensor_count % known == 0);
+		dim[auto_idx] = tensor_count / known;
+	}
 	if (CCV_CLI_OUTPUT_LEVEL_IS(CCV_CLI_VERBOSE))
 	{
 		PRINT(CCV_CLI_VERBOSE, "[cnnp_reshape_build] 2. input: (%d", params.dim[0]);
@@ -585,21 +600,21 @@ static void _ccv_cnnp_reshape_build(ccv_cnnp_model_t* const super, ccv_nnc_symbo
 			PRINT(CCV_CLI_VERBOSE, ", %d", params.dim[i]);
 		PRINT(CCV_CLI_VERBOSE, ")\n");
 	}
-	if (self->format > 0)
-		params.format = self->format;
-	assert(ccv_nnc_dimension_count(self->dim) <= ccv_nnc_tensor_count(params));
+	assert(ccv_nnc_dimension_count(dim) <= ccv_nnc_tensor_count(params));
 	ccv_nnc_tensor_symbol_t to = ccv_nnc_tensor_symbol_alias_to(graph, inputs[0]);
 	int stride_from_dim[CCV_NNC_MAX_DIM_ALLOC];
 	if (to.d == CCV_NNC_NO_TENSOR_SYMBOL) // If we are not reshape an alias, it is straightforward.
 	{
-		memcpy(params.dim, self->dim, sizeof(params.dim));
+		memcpy(params.dim, dim, sizeof(params.dim));
 		int* stride;
 		if (self->stride[0] == 0)
 		{
-			ccv_nnc_tensor_get_stride(self->dim, stride_from_dim);
+			ccv_nnc_tensor_get_stride(dim, stride_from_dim);
 			stride = stride_from_dim;
 		} else
 			stride = self->stride;
+		if (self->format > 0)
+			params.format = self->format;
 		outputs[0] = ccv_nnc_tensor_symbol_alias_new(graph, inputs[0], self->ofs, stride, params, 0);
 	} else {
 		// Otherwise, we need to check if it is permute. For permute, we cannot do alias directly.
@@ -609,40 +624,44 @@ static void _ccv_cnnp_reshape_build(ccv_cnnp_model_t* const super, ccv_nnc_symbo
 		// We identify permute by checking if the stride is not in descending order.
 		// This also covered "permute" through reshape, rather than using ccv_cnnp_permute directly.
 		const int nd = ccv_nnc_tensor_nd(params.dim);
-		const int new_nd = ccv_nnc_tensor_nd(self->dim);
+		const int new_nd = ccv_nnc_tensor_nd(dim);
 		int i, no_permute = 1;
 		// If the new dim has different nd, or we actually have a stride, we need to check if it is no permute or not.
-		if (new_nd != nd || (self->stride[0] != 0 && memcmp(self->stride, old_stride, sizeof(self->stride)) != 0))
+		if (new_nd != nd || (self->stride[0] != 0 && memcmp(self->stride, old_stride, sizeof(self->stride))))
 			for (i = 1; no_permute && i < nd; i++)
 				if (old_stride[i - 1] < old_stride[i])
 					no_permute = 0;
 		if (no_permute)
 		{ // Just straightforward reshape if there is no no permute.
-			memcpy(params.dim, self->dim, sizeof(params.dim));
+			memcpy(params.dim, dim, sizeof(params.dim));
 			int* stride;
 			if (self->stride[0] == 0)
 			{
 				if (new_nd != nd) // Cannot use old stride.
 				{
-					ccv_nnc_tensor_get_stride(self->dim, stride_from_dim);
+					ccv_nnc_tensor_get_stride(dim, stride_from_dim);
 					stride = stride_from_dim;
 				} else
 					stride = old_stride;
 			} else
 				stride = self->stride;
+			if (self->format > 0)
+				params.format = self->format;
 			outputs[0] = ccv_nnc_tensor_symbol_alias_new(graph, inputs[0], self->ofs, stride, params, 0);
 		} else {
 			// Otherwise, we first do format transform to plain tensor and then do reshape.
 			ccv_nnc_tensor_symbol_t permuted = ccv_nnc_tensor_symbol_new(graph, params, 0);
 			ccv_nnc_graph_exec_symbol_new(graph, CMD_FORMAT_TRANSFORM_FORWARD(), TENSOR_SYMBOL_LIST(inputs[0]), TENSOR_SYMBOL_LIST(permuted), "reshape");
-			memcpy(params.dim, self->dim, sizeof(params.dim));
+			memcpy(params.dim, dim, sizeof(params.dim));
 			int* stride;
 			if (self->stride[0] == 0)
 			{
-				ccv_nnc_tensor_get_stride(self->dim, stride_from_dim);
+				ccv_nnc_tensor_get_stride(dim, stride_from_dim);
 				stride = stride_from_dim;
 			} else
 				stride = self->stride;
+			if (self->format > 0)
+				params.format = self->format;
 			// And then we create alias against the permuted one.
 			outputs[0] = ccv_nnc_tensor_symbol_alias_new(graph, permuted, self->ofs, stride, params, 0);
 		}
@@ -976,7 +995,7 @@ static void _ccv_cnnp_batch_norm_build(ccv_cnnp_model_t* const super, ccv_nnc_sy
 	ccv_array_push(self->retainables, &out_var);
 	const ccv_nnc_tensor_symbol_t saved_mean = ccv_nnc_tensor_symbol_new(graph, bias_params, "saved_mean");
 	const ccv_nnc_tensor_symbol_t saved_inv_std = ccv_nnc_tensor_symbol_new(graph, bias_params, "saved_inv_std");
-	const int hw = ccv_nnc_tensor_hw(params, ccv_nnc_tensor_nd(params.dim));
+	const int hw = ccv_nnc_tensor_hw(params, ccv_nnc_tensor_nd(params.dim), CCV_NNC_MAX_DIM);
 	ccv_nnc_cmd_param_t batch_norm = self->params;
 	batch_norm.bnorm.count = hw >= 0 ? CCV_NNC_MAX_DIM + 1 : 1;
 	int i;
@@ -1102,16 +1121,38 @@ static void _ccv_cnnp_convolution_build(ccv_cnnp_model_t* const super, ccv_nnc_s
 	assert(output_size == 1);
 	const ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
 	int i;
-	const int nd = CCV_NNC_MAX_DIM + 2;
+	const int k_nd = ccv_nnc_tensor_nd(self->kdim);
+	const int nd = k_nd + 2;
 	ccv_nnc_tensor_param_t weights_params = params;
 	if (self->format)
 		weights_params.format = self->format;
 	ccv_nnc_tensor_set_n(&weights_params, self->filters);
-	assert(ccv_nnc_tensor_get_c(params) % self->groups == 0);
-	ccv_nnc_tensor_set_c(&weights_params, nd, ccv_nnc_tensor_get_c(params) / self->groups);
-	const int hw = ccv_nnc_tensor_hw(weights_params, nd);
+	const int a_nd = ccv_nnc_tensor_nd(params.dim);
+	int c;
+	switch (params.format)
+	{
+		case CCV_TENSOR_FORMAT_NHWC:
+			c = params.dim[a_nd - 1];
+			break;
+		case CCV_TENSOR_FORMAT_NCHW:
+			if (a_nd == k_nd + 1)
+				c = params.dim[0];
+			else
+				c = params.dim[a_nd <= 1 ? 0 : 1];
+			break;
+		case CCV_TENSOR_FORMAT_CHWN:
+			c = params.dim[0];
+			break;
+	}
+	assert(c % self->groups == 0);
+	ccv_nnc_tensor_set_c(&weights_params, nd, c / self->groups);
+	int hw = -1;
+	if (weights_params.format == CCV_TENSOR_FORMAT_NHWC || weights_params.format == CCV_TENSOR_FORMAT_CHWN)
+		hw = 1;
+	else if (weights_params.format == CCV_TENSOR_FORMAT_NCHW)
+		hw = 2;
 	assert(hw >= 0);
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < k_nd; i++)
 		weights_params.dim[i + hw] = self->kdim[i];
 	if (!self->weights.graph)
 		self->weights = ccv_nnc_tensor_symbol_new(graph, weights_params, "weights");
@@ -1122,12 +1163,13 @@ static void _ccv_cnnp_convolution_build(ccv_cnnp_model_t* const super, ccv_nnc_s
 	memset(bias_params.dim, 0, sizeof(bias_params.dim));
 	bias_params.dim[0] = self->filters;
 	ccv_nnc_cmd_t cmd = CMD_CONVOLUTION_FORWARD(self->groups, self->filters);
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < k_nd; i++)
 		cmd.info.size.dim[i] = self->kdim[i];
+	cmd.info.size.dim[k_nd] = c;
 	memcpy(cmd.info.convolution.dilation, self->dilation, sizeof(self->dilation));
 	ccv_nnc_tensor_param_t output_params;
 	// Dilate weight size based on the dilation factor.
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < k_nd; i++)
 		weights_params.dim[i + hw] = (self->kdim[i] - 1) * ccv_max(self->dilation[i], 1) + 1;
 	ccv_nnc_hint_tensor_auto(cmd, (ccv_nnc_tensor_param_t []){
 			params,
@@ -1235,10 +1277,11 @@ static void _ccv_cnnp_convolution_transpose_build(ccv_cnnp_model_t* const super,
 	ccv_nnc_tensor_param_t weights_params = params;
 	if (self->format)
 		weights_params.format = self->format;
-	ccv_nnc_tensor_set_n(&weights_params, ccv_nnc_tensor_get_c(params));
-	assert(ccv_nnc_tensor_get_c(params) % self->groups == 0);
+	const int c = ccv_nnc_tensor_get_c(params);
+	ccv_nnc_tensor_set_n(&weights_params, c);
+	assert(c % self->groups == 0);
 	ccv_nnc_tensor_set_c(&weights_params, nd, self->filters / self->groups);
-	const int hw = ccv_nnc_tensor_hw(weights_params, nd);
+	const int hw = ccv_nnc_tensor_hw(weights_params, nd, CCV_NNC_MAX_DIM);
 	assert(hw >= 0);
 	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
 		weights_params.dim[i + hw] = self->kdim[i];
@@ -1253,6 +1296,7 @@ static void _ccv_cnnp_convolution_transpose_build(ccv_cnnp_model_t* const super,
 	ccv_nnc_cmd_t cmd = CMD_CONVOLUTION_TRANSPOSE_FORWARD(self->groups, self->filters, self->output_padding);
 	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
 		cmd.info.size.dim[i] = self->kdim[i];
+	cmd.info.size.dim[CCV_NNC_MAX_DIM] = c;
 	memcpy(cmd.info.convolution_transpose.dilation, self->dilation, sizeof(self->dilation));
 	ccv_nnc_tensor_param_t output_params;
 	// Dilate weight size based on the dilation factor.
@@ -1459,7 +1503,7 @@ static void _ccv_cnnp_max_pool_build(ccv_cnnp_model_t* const super, ccv_nnc_symb
 	assert(input_size == 1);
 	assert(output_size == 1);
 	const ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
-	const int hw = ccv_nnc_tensor_hw(params, ccv_nnc_tensor_nd(params.dim));
+	const int hw = ccv_nnc_tensor_hw(params, ccv_nnc_tensor_nd(params.dim), CCV_NNC_MAX_DIM);
 	ccv_nnc_cmd_t cmd;
 	if (hw >= 0 && self->kdim[0] == 0 && self->kdim[1] == 0)
 		cmd = CMD_MAX_POOL_FORWARD(params.dim[hw], params.dim[hw + 1]);
@@ -1506,7 +1550,7 @@ static void _ccv_cnnp_average_pool_build(ccv_cnnp_model_t* const super, ccv_nnc_
 	assert(input_size == 1);
 	assert(output_size == 1);
 	const ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
-	const int hw = ccv_nnc_tensor_hw(params, ccv_nnc_tensor_nd(params.dim));
+	const int hw = ccv_nnc_tensor_hw(params, ccv_nnc_tensor_nd(params.dim), CCV_NNC_MAX_DIM);
 	ccv_nnc_cmd_t cmd;
 	if (hw >= 0 && self->kdim[0] == 0 && self->kdim[1] == 0)
 		cmd = CMD_AVERAGE_POOL_FORWARD(params.dim[hw], params.dim[hw + 1]);
@@ -3508,7 +3552,7 @@ static void _ccv_cnnp_datatype_conversion_build(ccv_cnnp_model_t* const super, c
 		params.datatype = self->datatype;
 	assert(output_size == 1);
 	outputs[0] = ccv_nnc_tensor_symbol_new(graph, params, 0);
-	ccv_nnc_graph_exec_symbol_new(graph, CMD_DATATYPE_CONVERSION_FORWARD(), inputs, output_size, outputs, output_size, 0);
+	ccv_nnc_graph_exec_symbol_new(graph, CMD_DATATYPE_CONVERSION_FORWARD(), inputs, output_size /* intentional */, outputs, output_size, 0);
 }
 
 static ccv_cnnp_model_t* _ccv_cnnp_datatype_conversion_copy(const ccv_cnnp_model_t* const self, void* const context);
@@ -3553,7 +3597,7 @@ static void _ccv_cnnp_clamp_build(ccv_cnnp_model_t* const super, ccv_nnc_symboli
 	ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
 	assert(output_size == 1);
 	outputs[0] = ccv_nnc_tensor_symbol_new(graph, params, 0);
-	ccv_nnc_graph_exec_symbol_new(graph, CMD_CLAMP_FORWARD(self->min, self->max), inputs, output_size, outputs, output_size, 0);
+	ccv_nnc_graph_exec_symbol_new(graph, CMD_CLAMP_FORWARD(self->min, self->max), inputs, output_size /* intentional */, outputs, output_size, 0);
 }
 
 static ccv_cnnp_model_t* _ccv_cnnp_clamp_copy(const ccv_cnnp_model_t* const self, void* const context);
@@ -3851,6 +3895,54 @@ static ccv_cnnp_model_t* _ccv_cnnp_contiguous_copy(const ccv_cnnp_model_t* const
 	return ccv_cnnp_contiguous(self->super.name);
 }
 
+// MARK - "Making" Copy Layer
+
+typedef struct {
+	ccv_cnnp_model_t super;
+	ccv_nnc_tensor_symbol_t output;
+} ccv_cnnp_model_copy_t;
+
+static void _ccv_cnnp_copy_build(ccv_cnnp_model_t* const super, ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, ccv_nnc_tensor_symbol_t* const outputs, const int output_size)
+{
+	PRINT(CCV_CLI_VERBOSE, "[cnnp_copy_build] -\n");
+	assert(input_size == 1);
+	assert(output_size == 1);
+	ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
+	ccv_nnc_tensor_symbol_t to = ccv_nnc_tensor_symbol_alias_to(graph, inputs[0]);
+	if (to.d == CCV_NNC_NO_TENSOR_SYMBOL) // If we are not reshape an alias, it is straightforward.
+	{
+		outputs[0] = inputs[0];
+		return;
+	}
+	outputs[0] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	ccv_nnc_graph_exec_symbol_t make_contiguous = ccv_nnc_graph_exec_symbol_new(graph, CMD_FORMAT_TRANSFORM_FORWARD(), inputs, 1, outputs, 1, "contiguous");
+	ccv_nnc_graph_exec_symbol_set_flags(graph, make_contiguous, CCV_NNC_GRAPH_EXEC_DISABLE_OPT);
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_copy_copy(const ccv_cnnp_model_t* const super, void* const context);
+
+static const ccv_cnnp_model_vtab_t ccv_cnnp_copy_isa = {
+	.build = _ccv_cnnp_copy_build,
+	.copy = _ccv_cnnp_copy_copy,
+};
+
+ccv_cnnp_model_t* ccv_cnnp_copy(const char* const name)
+{
+	ccv_cnnp_model_copy_t* const model_copy = (ccv_cnnp_model_copy_t*)cccalloc(1, sizeof(ccv_cnnp_model_copy_t));
+	model_copy->super.isa = &ccv_cnnp_copy_isa;
+	model_copy->super.input_size = 1;
+	model_copy->super.outputs = &model_copy->output;
+	model_copy->super.output_size = 1;
+	ccv_cnnp_model_copy_name(&model_copy->super, name);
+	return (ccv_cnnp_model_t*)model_copy;
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_copy_copy(const ccv_cnnp_model_t* const super, void* const context)
+{
+	const ccv_cnnp_model_copy_t* const self = (const ccv_cnnp_model_copy_t*)super;
+	return ccv_cnnp_copy(self->super.name);
+}
+
 // MARK - Scaled-Dot Product Attention Layer
 
 typedef struct {
@@ -4093,4 +4185,308 @@ static ccv_cnnp_model_t* _ccv_cnnp_debug_copy(const ccv_cnnp_model_t* const supe
 	if (self->debug_copy && self->debug_context)
 		debug_context = self->debug_copy(self->debug_context);
 	return ccv_cnnp_debug(self->debugger, debug_context, self->debug_deinit, self->debug_copy, self->super.name);
+}
+
+/// MARK - Sort layer.
+
+typedef struct {
+	ccv_cnnp_model_t super;
+	ccv_nnc_tensor_symbol_t outputs[2];
+	int along_axis;
+	int descending;
+} ccv_cnnp_model_sort_t;
+
+static void _ccv_cnnp_sort_build(ccv_cnnp_model_t* const super, ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, ccv_nnc_tensor_symbol_t* const outputs, const int output_size)
+{
+	ccv_cnnp_model_sort_t* const self = (ccv_cnnp_model_sort_t*)super;
+	PRINT(CCV_CLI_VERBOSE, "[cnnp_sort_build] - along_axis: %d, descending: %d\n", self->along_axis, self->descending);
+	ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
+	assert(output_size == 2);
+	outputs[0] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	params.datatype = CCV_32S;
+	outputs[1] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	ccv_nnc_graph_exec_symbol_new(graph, CMD_SORT_FORWARD(self->along_axis, self->descending), inputs, input_size, outputs, output_size, "sort");
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_sort_copy(const ccv_cnnp_model_t* const self, void* const context);
+
+static const ccv_cnnp_model_vtab_t ccv_cnnp_sort_isa = {
+	.build = _ccv_cnnp_sort_build,
+	.copy = _ccv_cnnp_sort_copy,
+};
+
+ccv_cnnp_model_t* ccv_cnnp_sort(const int along_axis, const int descending, const char* const name)
+{
+	ccv_cnnp_model_sort_t* const model_sort = (ccv_cnnp_model_sort_t*)cccalloc(1, sizeof(ccv_cnnp_model_sort_t));
+	model_sort->super.isa = &ccv_cnnp_sort_isa;
+	model_sort->super.input_size = 0;
+	model_sort->super.outputs = model_sort->outputs;
+	model_sort->super.output_size = 2;
+	model_sort->along_axis = along_axis;
+	model_sort->descending = descending;
+	ccv_cnnp_model_copy_name(&model_sort->super, name);
+	return (ccv_cnnp_model_t*)model_sort;
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_sort_copy(const ccv_cnnp_model_t* const super, void* const context)
+{
+	ccv_cnnp_model_sort_t* const self = (ccv_cnnp_model_sort_t*)super;
+	return ccv_cnnp_sort(self->along_axis, self->descending, self->super.name);
+}
+
+/// MARK - Partition layer.
+
+typedef struct {
+	ccv_cnnp_model_t super;
+	ccv_nnc_tensor_symbol_t outputs[2];
+	int kth;
+	int along_axis;
+	int descending;
+} ccv_cnnp_model_partition_t;
+
+static void _ccv_cnnp_partition_build(ccv_cnnp_model_t* const super, ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, ccv_nnc_tensor_symbol_t* const outputs, const int output_size)
+{
+	ccv_cnnp_model_partition_t* const self = (ccv_cnnp_model_partition_t*)super;
+	PRINT(CCV_CLI_VERBOSE, "[cnnp_partition_build] - kth: %d, along_axis: %d, descending: %d\n", self->kth, self->along_axis, self->descending);
+	ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
+	assert(output_size == 2);
+	if (self->kth > 0)
+		params.dim[self->along_axis] = self->kth;
+	outputs[0] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	params.datatype = CCV_32S;
+	outputs[1] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	ccv_nnc_graph_exec_symbol_new(graph, CMD_PARTITION_FORWARD(self->kth, self->along_axis, self->descending), inputs, input_size, outputs, output_size, "partition");
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_partition_copy(const ccv_cnnp_model_t* const self, void* const context);
+
+static const ccv_cnnp_model_vtab_t ccv_cnnp_partition_isa = {
+	.build = _ccv_cnnp_partition_build,
+	.copy = _ccv_cnnp_partition_copy,
+};
+
+ccv_cnnp_model_t* ccv_cnnp_partition(const int kth, const int along_axis, const int descending, const char* const name)
+{
+	ccv_cnnp_model_partition_t* const model_partition = (ccv_cnnp_model_partition_t*)cccalloc(1, sizeof(ccv_cnnp_model_partition_t));
+	model_partition->super.isa = &ccv_cnnp_partition_isa;
+	model_partition->super.input_size = 0;
+	model_partition->super.outputs = model_partition->outputs;
+	model_partition->super.output_size = 2;
+	model_partition->kth = kth;
+	model_partition->along_axis = along_axis;
+	model_partition->descending = descending;
+	ccv_cnnp_model_copy_name(&model_partition->super, name);
+	return (ccv_cnnp_model_t*)model_partition;
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_partition_copy(const ccv_cnnp_model_t* const super, void* const context)
+{
+	ccv_cnnp_model_partition_t* const self = (ccv_cnnp_model_partition_t*)super;
+	return ccv_cnnp_partition(self->kth, self->along_axis, self->descending, self->super.name);
+}
+
+/// MARK - Unique consecutive layer.
+
+typedef struct {
+	ccv_cnnp_model_t super;
+	ccv_nnc_tensor_symbol_t outputs[2];
+	int bincount;
+} ccv_cnnp_model_unique_consecutive_t;
+
+static void _ccv_cnnp_unique_consecutive_build(ccv_cnnp_model_t* const super, ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, ccv_nnc_tensor_symbol_t* const outputs, const int output_size)
+{
+	ccv_cnnp_model_unique_consecutive_t* const self = (ccv_cnnp_model_unique_consecutive_t*)super;
+	PRINT(CCV_CLI_VERBOSE, "[cnnp_unique_consecutive_build] - bincount: %d\n", self->bincount);
+	ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
+	assert(output_size == 2);
+	if (self->bincount > 0)
+		params.dim[0] = ccv_min(params.dim[0], self->bincount);
+	outputs[0] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	params.datatype = CCV_32S;
+	outputs[1] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	ccv_nnc_graph_exec_symbol_new(graph, CMD_UNIQUE_CONSECUTIVE_FORWARD(self->bincount), inputs, input_size, outputs, output_size, "unique_consecutive");
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_unique_consecutive_copy(const ccv_cnnp_model_t* const self, void* const context);
+
+static const ccv_cnnp_model_vtab_t ccv_cnnp_unique_consecutive_isa = {
+	.build = _ccv_cnnp_unique_consecutive_build,
+	.copy = _ccv_cnnp_unique_consecutive_copy,
+};
+
+ccv_cnnp_model_t* ccv_cnnp_unique_consecutive(const int bincount, const char* const name)
+{
+	ccv_cnnp_model_unique_consecutive_t* const model_unique_consecutive = (ccv_cnnp_model_unique_consecutive_t*)cccalloc(1, sizeof(ccv_cnnp_model_unique_consecutive_t));
+	model_unique_consecutive->super.isa = &ccv_cnnp_unique_consecutive_isa;
+	model_unique_consecutive->super.input_size = 0;
+	model_unique_consecutive->super.outputs = model_unique_consecutive->outputs;
+	model_unique_consecutive->super.output_size = 2;
+	model_unique_consecutive->bincount = bincount;
+	ccv_cnnp_model_copy_name(&model_unique_consecutive->super, name);
+	return (ccv_cnnp_model_t*)model_unique_consecutive;
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_unique_consecutive_copy(const ccv_cnnp_model_t* const super, void* const context)
+{
+	ccv_cnnp_model_unique_consecutive_t* const self = (ccv_cnnp_model_unique_consecutive_t*)super;
+	return ccv_cnnp_unique_consecutive(self->bincount, self->super.name);
+}
+
+/// MARK - Scatter add layer.
+
+typedef struct {
+	ccv_cnnp_model_t super;
+	ccv_nnc_tensor_symbol_t output;
+	int bincount;
+} ccv_cnnp_model_scatter_add_t;
+
+static void _ccv_cnnp_scatter_add_build(ccv_cnnp_model_t* const super, ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, ccv_nnc_tensor_symbol_t* const outputs, const int output_size)
+{
+	ccv_cnnp_model_scatter_add_t* const self = (ccv_cnnp_model_scatter_add_t*)super;
+	PRINT(CCV_CLI_VERBOSE, "[cnnp_scatter_add_build] - bincount: %d\n", self->bincount);
+	ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
+	assert(output_size == 1);
+	assert(self->bincount > 0);
+	params.dim[0] = self->bincount;
+	outputs[0] = ccv_nnc_tensor_symbol_new(graph, params, 0);
+	ccv_nnc_graph_exec_symbol_new(graph, CMD_SCATTER_ADD_FORWARD(self->bincount), inputs, input_size, outputs, output_size, "scatter_add");
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_scatter_add_copy(const ccv_cnnp_model_t* const self, void* const context);
+
+static const ccv_cnnp_model_vtab_t ccv_cnnp_scatter_add_isa = {
+	.build = _ccv_cnnp_scatter_add_build,
+	.copy = _ccv_cnnp_scatter_add_copy,
+};
+
+ccv_cnnp_model_t* ccv_cnnp_scatter_add(const int bincount, const char* const name)
+{
+	assert(bincount > 0);
+	ccv_cnnp_model_scatter_add_t* const model_scatter_add = (ccv_cnnp_model_scatter_add_t*)cccalloc(1, sizeof(ccv_cnnp_model_scatter_add_t));
+	model_scatter_add->super.isa = &ccv_cnnp_scatter_add_isa;
+	model_scatter_add->super.input_size = 0;
+	model_scatter_add->super.outputs = &model_scatter_add->output;
+	model_scatter_add->super.output_size = 1;
+	model_scatter_add->bincount = bincount;
+	ccv_cnnp_model_copy_name(&model_scatter_add->super, name);
+	return (ccv_cnnp_model_t*)model_scatter_add;
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_scatter_add_copy(const ccv_cnnp_model_t* const super, void* const context)
+{
+	ccv_cnnp_model_scatter_add_t* const self = (ccv_cnnp_model_scatter_add_t*)super;
+	return ccv_cnnp_scatter_add(self->bincount, self->super.name);
+}
+
+// MARK - Segmented Dense Layer
+
+typedef struct {
+	ccv_cnnp_model_t super;
+	ccv_nnc_tensor_symbol_t output;
+	ccv_nnc_tensor_symbol_t weights;
+	ccv_nnc_tensor_symbol_t bias;
+	int segments;
+	int count;
+	int no_bias;
+	int flags;
+} ccv_cnnp_model_segmented_dense_t;
+
+static void _ccv_cnnp_segmented_dense_build(ccv_cnnp_model_t* const super, ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, ccv_nnc_tensor_symbol_t* const outputs, const int output_size)
+{
+	ccv_cnnp_model_segmented_dense_t* const self = (ccv_cnnp_model_segmented_dense_t*)super;
+	PRINT(CCV_CLI_VERBOSE, "[cnnp_segmented_dense_build] -\n");
+	assert(input_size == 3);
+	assert(output_size == 1);
+	const ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, inputs[0]);
+	const ccv_nnc_tensor_param_t indices_params = ccv_nnc_tensor_symbol_params(graph, inputs[1]);
+	const ccv_nnc_tensor_param_t counts_params = ccv_nnc_tensor_symbol_params(graph, inputs[2]);
+	ccv_nnc_tensor_param_t weights_params = params;
+	memset(weights_params.dim, 0, sizeof(weights_params.dim));
+	weights_params.dim[0] = self->segments;
+	weights_params.dim[1] = self->count;
+	weights_params.dim[2] = params.dim[ccv_nnc_tensor_nd(params.dim) - 1];
+	if (!self->weights.graph)
+		self->weights = ccv_nnc_tensor_symbol_new(graph, weights_params, "weights");
+	assert(self->weights.graph == graph);
+	ccv_nnc_tensor_param_t bias_params = params;
+	memset(bias_params.dim, 0, sizeof(bias_params.dim));
+	bias_params.dim[0] = self->segments;
+	bias_params.dim[1] = self->count;
+	ccv_nnc_cmd_t cmd = {0};
+	cmd.cmd = CCV_NNC_SEGMENTED_GEMM_FORWARD;
+	cmd.info.blas.a[0] = 1;
+	cmd.info.blas.a[1] = 1;
+	cmd.info.blas.transpose_b[0] = 1;
+	cmd.info.blas.transpose_b[1] = 2;
+	cmd.info.blas.flags = self->flags;
+	ccv_nnc_tensor_param_t output_params;
+	ccv_nnc_hint_tensor_auto(cmd, (ccv_nnc_tensor_param_t []){
+			params, indices_params, counts_params,
+			weights_params,
+			bias_params,
+		}, 5, ccv_nnc_no_hint, &output_params, 1);
+	const ccv_nnc_tensor_symbol_t output = ccv_nnc_tensor_symbol_new(graph, output_params, 0);
+	if (self->no_bias)
+		ccv_nnc_graph_exec_symbol_new(graph, cmd, TENSOR_SYMBOL_LIST(inputs[0], inputs[1], inputs[2], self->weights), TENSOR_SYMBOL_LIST(output), "segmented_dense");
+	else {
+		if (!self->bias.graph)
+			self->bias = ccv_nnc_tensor_symbol_new(graph, bias_params, "bias");
+		ccv_nnc_graph_exec_symbol_new(graph, cmd, TENSOR_SYMBOL_LIST(inputs[0], inputs[1], inputs[2], self->weights, self->bias), TENSOR_SYMBOL_LIST(output), "segmented_dense");
+	}
+	outputs[0] = output;
+}
+
+static void _ccv_cnnp_segmented_dense_init_states(ccv_cnnp_model_t* const super, ccv_nnc_symbolic_graph_t* const graph, const ccv_cnnp_state_initializer_f initializer, void* const context)
+{
+	ccv_cnnp_model_segmented_dense_t* const self = (ccv_cnnp_model_segmented_dense_t*)super;
+	const ccv_nnc_tensor_param_t weight_params = ccv_nnc_tensor_symbol_params(graph, self->weights);
+	const int c = weight_params.dim[1];
+	const float std = sqrtf(2) / sqrtf(c);
+	const float bound = sqrtf(3) * std;
+	initializer(context, CMD_RANDOM_UNIFORM_FORWARD(-bound, bound), ccv_nnc_no_hint, 0, 0, self->weights);
+	if (self->bias.graph)
+		initializer(context, CMD_SET_FORWARD(0), ccv_nnc_no_hint, 0, 0, self->bias);
+}
+
+static void _ccv_cnnp_segmented_dense_add_to_parameter(ccv_cnnp_model_t* const super, const ccv_cnnp_add_to_array_f add_to_array, void* const parameters, const int is_trainable)
+{
+	ccv_cnnp_model_segmented_dense_t* const self = (ccv_cnnp_model_segmented_dense_t*)super;
+	add_to_array(parameters, self->weights, is_trainable);
+	if (self->bias.graph)
+		add_to_array(parameters, self->bias, is_trainable);
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_segmented_dense_copy(const ccv_cnnp_model_t* const super, void* const context);
+
+static const ccv_cnnp_model_vtab_t ccv_cnnp_segmented_dense_isa = {
+	.build = _ccv_cnnp_segmented_dense_build,
+	.init_states = _ccv_cnnp_segmented_dense_init_states,
+	.add_to_parameter = _ccv_cnnp_segmented_dense_add_to_parameter,
+	.copy = _ccv_cnnp_segmented_dense_copy,
+};
+
+ccv_cnnp_model_t* ccv_cnnp_segmented_dense(const int segments, const int count, const int no_bias, const int flags, const int is_trainable, const char* const name)
+{
+	ccv_cnnp_model_segmented_dense_t* const model_segmented_dense = (ccv_cnnp_model_segmented_dense_t*)cccalloc(1, sizeof(ccv_cnnp_model_segmented_dense_t));
+	model_segmented_dense->super.isa = &ccv_cnnp_segmented_dense_isa;
+	model_segmented_dense->super.input_size = 3;
+	model_segmented_dense->super.outputs = &model_segmented_dense->output;
+	model_segmented_dense->super.output_size = 1;
+	model_segmented_dense->super.is_trainable = is_trainable;
+	ccv_cnnp_model_copy_name(&model_segmented_dense->super, name);
+	model_segmented_dense->weights.d = CCV_NNC_NO_TENSOR_SYMBOL;
+	model_segmented_dense->weights.graph = 0;
+	model_segmented_dense->bias.d = CCV_NNC_NO_TENSOR_SYMBOL;
+	model_segmented_dense->bias.graph = 0;
+	model_segmented_dense->segments = segments;
+	model_segmented_dense->count = count;
+	model_segmented_dense->no_bias = no_bias;
+	model_segmented_dense->flags = flags;
+	return (ccv_cnnp_model_t*)model_segmented_dense;
+}
+
+static ccv_cnnp_model_t* _ccv_cnnp_segmented_dense_copy(const ccv_cnnp_model_t* const super, void* const context)
+{
+	const ccv_cnnp_model_segmented_dense_t* const self = (const ccv_cnnp_model_segmented_dense_t*)super;
+	return ccv_cnnp_segmented_dense(self->segments, self->count, self->no_bias, self->flags, self->super.is_trainable, self->super.name);
 }

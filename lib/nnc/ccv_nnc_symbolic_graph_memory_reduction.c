@@ -13,62 +13,6 @@ static void _ccv_nnc_remove_unused_from_marked(const uint32_t* const tensor_used
 		tensor_marked[i] &= tensor_used[i];
 }
 
-static ccv_sparse_matrix_t* _ccv_nnc_exec_dep_new(const ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_graph_visit_t* const visit)
-{
-	ccv_sparse_matrix_t* exec_dep = ccv_sparse_matrix_new(graph->exec_symbol_info->rnum, graph->exec_symbol_info->rnum, CCV_32S | CCV_C1, CCV_SPARSE_ROW_MAJOR, 0);
-	int* buf = (int*)ccmalloc(sizeof(int) * graph->exec_symbol_info->rnum * 2);
-	int buf_size;
-#define for_block(x, val) \
-	do { \
-		if (((int32_t*)val)[0] > 0) \
-		{ \
-			buf[buf_size * 2] = x; \
-			buf[buf_size * 2 + 1] = ((int32_t*)val)[0] + 1; \
-			++buf_size; \
-		} \
-	} while (0)
-	const ccv_nnc_graph_exec_symbol_info_t* const exec_symbol_info = (ccv_nnc_graph_exec_symbol_info_t*)ccv_array_get(graph->exec_symbol_info, 0);
-	int i, j;
-	ccv_nnc_graph_visit_for(visit, exec_symbol_info, node, idx, term) {
-		buf_size = 0; /* save all its parent deps to this buffer */
-		ccv_sparse_matrix_vector_t* vector = ccv_get_sparse_matrix_vector(exec_dep, idx);
-		if (vector)
-			CCV_SPARSE_VECTOR_FOREACH(exec_dep, vector, for_block);
-		if (!node->outgoings)
-			continue;
-		for (i = 0; i < node->outgoings->rnum; i++)
-		{
-			const int outgoing = *(int*)ccv_array_get(node->outgoings, i);
-			const int32_t one = 1;
-			ccv_numeric_data_t cell = ccv_get_sparse_matrix_cell(exec_dep, outgoing, idx);
-			/* If not found, set, if the current node is the destination node, no need 
-			 * set itself as parent of subsequent nodes because its terminal nature. */
-			if (!cell.i32 || cell.i32[0] == 0)
-				ccv_set_sparse_matrix_cell(exec_dep, outgoing, idx, &one);
-			if (buf_size > 0)
-			{
-				ccv_sparse_matrix_vector_t* vector = ccv_get_sparse_matrix_vector(exec_dep, outgoing);
-				assert(vector);
-				for (j = 0; j < buf_size; j++) /* set with all idx's dependencies as well */
-				{
-					ccv_numeric_data_t cell = ccv_get_sparse_matrix_cell_from_vector(exec_dep, vector, buf[j * 2]);
-					/* If not found, set */
-					if (!cell.i32 || cell.i32[0] == 0)
-						ccv_set_sparse_matrix_cell_from_vector(exec_dep, vector, buf[j * 2], &buf[j * 2 + 1]);
-					else {
-						/* Otherwise, set to the longest one */
-						int32_t dep = ccv_max(cell.i32[0], buf[j * 2 + 1]);
-						ccv_set_sparse_matrix_cell_from_vector(exec_dep, vector, buf[j * 2], &dep);
-					}
-				}
-			}
-		}
-	} ccv_nnc_graph_visit_endfor
-#undef for_block
-	ccfree(buf);
-	return exec_dep;
-}
-
 typedef struct {
 	int okay;
 	int original;
@@ -136,9 +80,9 @@ void ccv_nnc_symbolic_graph_memory_reduction(ccv_nnc_symbolic_graph_t* const gra
 			if ((tensor_marked[d >> 5] & (1u << (d & 0x1f))))
 				tensor_marked[d >> 5] &= ~(1u << (d & 0x1f));
 		}
+	ccv_nnc_exec_dep_t exec_deps = ccv_nnc_exec_dep_new(graph, visit);
 	// Now tensor_marked only contains the tensors that we think beneficial to reconvert. Find the best place to insert conversion.
 	ccv_nnc_conversion_info_t* const conversion_info = cccalloc(tensor_symbol_info_size, sizeof(ccv_nnc_conversion_info_t));
-	ccv_sparse_matrix_t* const exec_dep = _ccv_nnc_exec_dep_new(graph, visit);
 	ccv_nnc_graph_visit_for(visit, exec_symbol_info, node, idx) {
 		if (node->cmd.cmd == CCV_NNC_DATATYPE_CONVERSION_FORWARD && node->output_size >= 1 && node->outputs[0] >= 0)
 		{
@@ -180,13 +124,13 @@ void ccv_nnc_symbolic_graph_memory_reduction(ccv_nnc_symbolic_graph_t* const gra
 		for (j = 0; j < nodes->rnum; j++)
 		{
 			const int d = *(int*)ccv_array_get(nodes, j);
-			ccv_sparse_matrix_vector_t* vector = ccv_get_sparse_matrix_vector(exec_dep, d);
+			ccv_sparse_matrix_vector_t* const vector = ccv_get_sparse_matrix_vector(exec_deps.deps, d);
 			assert(vector);
 			for (k = 0; k < old_conversion_nodes->rnum; k++)
 			{
 				const int dd = *(int*)ccv_array_get(old_conversion_nodes, k);
-				ccv_numeric_data_t cell = ccv_get_sparse_matrix_cell_from_vector(exec_dep, vector, dd);
-				if (cell.i32 && cell.i32[0] <= 3) // If the old conversion node to existing node has only hop distance of 3, no need to insert new conversion nodes. This is an empirical value.
+				const int hop = ccv_nnc_exec_dep_hop(exec_deps, d, vector, dd);
+				if (hop >= 0 && hop <= 3)
 					flag = 1;
 			}
 			if (flag)
@@ -219,8 +163,8 @@ void ccv_nnc_symbolic_graph_memory_reduction(ccv_nnc_symbolic_graph_t* const gra
 						continue;
 					}
 					// Check dependencies, if there is a dependency from y node to dd, dd cannot be source.
-					const ccv_numeric_data_t cell = ccv_get_sparse_matrix_cell(exec_dep, dd, ddd);
-					if (cell.i32 && cell.i32[0] > 0)
+					const int checked = ccv_nnc_exec_dep_check(exec_deps, dd, 0, ddd);
+					if (checked)
 						flag = 1;
 				}
 				if (!flag)
@@ -274,7 +218,7 @@ void ccv_nnc_symbolic_graph_memory_reduction(ccv_nnc_symbolic_graph_t* const gra
 			}
 		}
 	ccv_nnc_graph_visit_free(visit);
-	ccv_matrix_free(exec_dep);
+	ccv_nnc_exec_dep_free(exec_deps);
 	ccfree(tensor_marked);
 	for (i = 0; i < tensor_symbol_info_size; i++)
 	{

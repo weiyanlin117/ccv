@@ -23,7 +23,7 @@ static void _ccv_nnc_roi_align_tensor_auto_forw(const ccv_nnc_cmd_param_t cmd, c
 {
 	assert(output_size == 1);
 	outputs[0] = inputs[0];
-	const int hw = ccv_nnc_tensor_hw(outputs[0], ccv_nnc_tensor_nd(outputs[0].dim));
+	const int hw = ccv_nnc_tensor_hw(outputs[0], ccv_nnc_tensor_nd(outputs[0].dim), CCV_NNC_MAX_DIM);
 	assert(hw >= 0);
 	outputs[0].dim[hw] = ccv_max(cmd.size.dim[0], 1);
 	outputs[0].dim[hw + 1] = ccv_max(cmd.size.dim[1], 1);

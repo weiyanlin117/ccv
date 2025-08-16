@@ -86,6 +86,41 @@ TEST_CASE("convolutional network of 5x3 on 17x27 with uniform weights")
 	ccv_nnc_tensor_free(a);
 }
 
+TEST_CASE("convolutional network of 11x11x11 on 33x225x185 with uniform weights")
+{
+	ccv_nnc_tensor_t* a = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 33, 225, 185, 3), 0);
+	ccv_nnc_tensor_t* b = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 7, 55, 45, 4), 0);
+	ccv_nnc_cmd_t cmd = CMD_CONVOLUTION_FORWARD(1, 4, 11, 11, 11, 3);
+	ccv_nnc_hint_t hint = ccv_nnc_hint_auto(cmd.info, a->info, b->info);
+	hint.stride.dim[0] = 4;
+	hint.border.begin[0] = 1;
+	hint.border.end[0] = 1;
+	ccv_nnc_tensor_t* w = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 4, 11, 11, 11, 3), 0);
+	ccv_nnc_tensor_t* bias = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 4), 0);
+	// configure the inlets.
+	int i;
+	for (i = 0; i < 11 * 11 * 11 * 3 * 4; i++)
+		w->data.f32[i] = 1;
+	for (i = 0; i < 33 * 225 * 185 * 3; i++)
+		a->data.f32[i] = 1;
+	for (i = 0; i < 4; i++)
+		bias->data.f32[i] = 0;
+	ccv_nnc_cmd_exec(cmd, hint, 0, TENSOR_LIST(a, w, bias), TENSOR_LIST(b), 0);
+	ccv_nnc_tensor_t* c = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 7, 55, 45, 4), 0);
+	int x, y, z;
+	for (z = 0; z < 7; z++)
+		for (y = 0; y < 55; y++)
+			for (x = 0; x < 45; x++)
+				for (i = 0; i < 4; i++)
+					c->data.f32[((z * 55 + y) * 45 + x) * 4 + i] = ((x == 0 && y == 0 && z == 0) || (x == 0 && y == 0 && z == 6) || (x == 0 && y == 54 && z == 0) || (x == 0 && y == 54 && z == 6) || (x == 44 && y == 0 && z == 0) || (x == 44 && y == 0 && z == 6) || (x == 44 && y == 54 && z == 0) || (x == 44 && y == 54 && z == 6)) ? 3000 : (((x == 0 && y == 0) || (x == 0 && z == 0) || (y == 0 && z == 0) || (x == 0 && y == 54) || (x == 0 && z == 6) || (y == 0 && z == 6) || (x == 44 && y == 0) || (x == 44 && z == 0) || (y == 54 && z == 0) || (x == 44 && y == 54) || (x == 44 && z == 6) || (y == 54 && z == 6)) ? 3300 : ((x == 0 || x == 44 || y == 0 || y == 54 || z == 0 || z == 6) ? 3630 : 3993));
+	REQUIRE_TENSOR_EQ(b, c, "7x55x45 matrix should be exactly a matrix fill 3993, with 3000 on the corner and 3300 on the ridge and 3630 on the surface");
+	ccv_nnc_tensor_free(c);
+	ccv_nnc_tensor_free(bias);
+	ccv_nnc_tensor_free(w);
+	ccv_nnc_tensor_free(b);
+	ccv_nnc_tensor_free(a);
+}
+
 TEST_CASE("convolutional network of 11x11 on 225x185 with non-uniform weights")
 {
 	ccv_nnc_tensor_t* a = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, 225, 185, 1), 0);

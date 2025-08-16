@@ -9,8 +9,8 @@ extern "C" {
 
 #ifdef HAVE_CUDA_SM80
 #include <nnc/gpu/3rdparty/flash_attn/flash_api.h>
-#include "fused.h"
-#include "sage_attn_utils.cuh"
+#include <nnc/gpu/3rdparty/sage_attn/fused.h>
+#include <nnc/gpu/3rdparty/sage_attn/sage_attn_utils.cuh>
 
 // SageAttention wrapper function for INT8 quantized attention
 static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
@@ -298,7 +298,7 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
 	if (bias) // bias always requires a weight matrix.
 		{ assert(weights); }
 
-	ccv_nnc_tensor_view_t* const saved_softmax_lse = (ccv_nnc_tensor_view_t*)outputs[1];
+	ccv_nnc_tensor_view_t* const saved_softmax_lse = output_size > 1 ? (ccv_nnc_tensor_view_t*)outputs[1] : 0;
 	ccv_nnc_tensor_view_t* const o = (weights) ? (ccv_nnc_tensor_view_t*)outputs[2] : (ccv_nnc_tensor_view_t*)outputs[0];
 	const int q_nd = ccv_nnc_tensor_nd(q->info.dim);
 	assert(q_nd == 3 || q_nd == 4);
@@ -403,7 +403,7 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
 
 	Flash_fwd_params params;
 	memset(&params, 0, sizeof(params));
-	params.is_bf16 = false;
+	params.is_bf16 = q->info.datatype == CCV_16BF;
 	params.q_ptr = q->data.u8;
 	params.k_ptr = k->data.u8;
 	params.v_ptr = v->data.u8;
@@ -448,7 +448,8 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
 	// In any case we don't expect seqlen_q to be larger than 64 for inference.
 	const int num_m_blocks = (R + 64 - 1) / 64;
 	const ccv_nnc_cuda_device_prop_t props = ccv_nnc_gpu_device_props();
-	params.num_splits = num_splits_heuristic(batch_size * Hq * num_m_blocks, props.multi_processor_count, num_n_blocks, 128);
+	// Only enable splitkv if R is 1.
+	params.num_splits = R == 1 ? num_splits_heuristic(batch_size * Hq * num_m_blocks, props.multi_processor_count * 2, num_n_blocks, 128) : 1;
 	if (saved_softmax_lse)
 		params.softmax_lse_ptr = saved_softmax_lse->data.u8;
 	if (params.num_splits > 1)
@@ -471,6 +472,105 @@ static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, c
 	cudaStream_t stream = ccv_nnc_stream_context_get_stream(stream_context);
 	run_mha_fwd(params, stream, false);
 	CUDA_ENFORCE(cudaGetLastError());
+	if (weights)
+	{
+		const ccv_nnc_tensor_view_t* a = o;
+		const ccv_nnc_tensor_view_t* w = weights;
+		ccv_nnc_tensor_view_t* b = (ccv_nnc_tensor_view_t*)outputs[0];
+		assert(!bias || (bias->info.dim[1] == 0 || bias->info.dim[2] == 0 || bias->info.dim[3] == 0)); // It is a 1-d array
+		assert(CCV_IS_TENSOR_CONTIGUOUS(b));
+		const int b_nd = ccv_nnc_tensor_nd(b->info.dim);
+		assert(b_nd == 3);
+		int w_batch_size, w_rows, w_cols, w_batch_inc, w_rows_inc, w_cols_inc;
+		const int w_nd = ccv_nnc_tensor_nd(w->info.dim);
+		const int transpose_w[2] = {
+			w_nd - 2, w_nd - 1
+		};
+		ccv_nnc_tensor_get_matrix_params(w->info, CCV_IS_TENSOR_VIEW(w) ? w->stride : 0, w->info.dim, transpose_w, &w_batch_size, &w_rows, &w_cols, &w_batch_inc, &w_rows_inc, &w_cols_inc);
+		int a_rows, a_cols;
+		if (o_nd == 3) {
+			a_rows = odim[1] * odim[2];
+			a_cols = odim[3];
+		} else if (q_nd == 4) {
+			a_rows = odim[0] * odim[1];
+			a_cols = odim[2] * odim[3];
+		}
+		int b_rows, b_cols, b_rows_inc;
+		b_rows = b->info.dim[0] * b->info.dim[1];
+		b_cols = b->info.dim[2];
+		b_rows_inc = b_cols;
+		assert(a_rows == b_rows);
+		assert(a_cols == w_rows);
+		assert(w_cols == b_cols);
+
+		const cublasOperation_t transa = CUBLAS_OP_T;
+		const cublasOperation_t transb = CUBLAS_OP_N;
+		const int lda_inc = w_cols_inc;
+		const int ldb_inc = a_cols;
+		size_t w_data_size = 0;
+		int w_datatype = w->info.datatype;
+		if (CCV_GET_DATA_TYPE(w->info.datatype) == CCV_QX)
+		{
+			ccv_nnc_tensor_param_t w_params = w->info;
+			w_datatype = (w_params.datatype & 0xff) << 12;
+			ccv_nnc_tensor_param_t depalettize_w_params = w_params;
+			depalettize_w_params.datatype = w_datatype;
+			depalettize_w_params.reserved = 0;
+			w_data_size = ccv_nnc_tensor_data_size(depalettize_w_params);
+		}
+		const size_t cublas_size = ccv_nnc_cublas_workspace_size_in_bytes(inputs, input_size, outputs, output_size);
+		void* workspace = 0;
+		if (w_data_size > 0)
+			workspace = ccv_nnc_stream_context_get_workspace(stream_context, cublas_size + w_data_size, CCV_TENSOR_GPU_MEMORY);
+		unsigned char* w_data = w->data.u8;
+		if (CCV_GET_DATA_TYPE(w->info.datatype) == CCV_QX)
+		{
+			ccv_nnc_tensor_param_t w_params = w->info;
+			const size_t count = ccv_nnc_tensor_count(w_params);
+			const int qbits = (w_params.datatype & 0xf00) >> 8;
+			const int number_in_blocks = w_params.reserved;
+			w_data = (unsigned char*)workspace + cublas_size;
+			ccv_nnc_compat_depalettize(w->data.u8, w_datatype, ccv_nnc_tensor_data_size_without_padding(w_params), qbits, number_in_blocks, w_data, count, stream_context);
+		}
+		cublasHandle_t cublas = ccv_nnc_stream_context_get_cublas(stream_context);
+		static const half one_f16 = 1;
+		static const float one_f32 = 1;
+		static const double one_f64 = 1;
+		static const double zero_f64 = 0;
+		const void* zero = &zero_f64;
+		const void* one;
+		const int is_downcast = ((cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_16F) && b->info.datatype == CCV_16F);
+		switch (ccv_nnc_cuda_compute_datatype(b->info.datatype, is_downcast))
+		{
+			case CUBLAS_COMPUTE_16F:
+				one = &one_f16;
+				break;
+			case CUBLAS_COMPUTE_32F:
+			case CUBLAS_COMPUTE_32F_FAST_TF32:
+				one = &one_f32;
+				break;
+			case CUBLAS_COMPUTE_64F:
+				one = &one_f64;
+				break;
+			default:
+				assert(0);
+		}
+		ccv_nnc_stream_context_set_cublas_workspace(cublas, stream_context, cublas_size);
+		if (bias)
+		{
+			int bias_batch_size, bias_rows, bias_cols, bias_batch_inc, bias_rows_inc, bias_cols_inc;
+			const static int no_transpose[2] = {};
+			ccv_nnc_tensor_get_matrix_params(bias->info, CCV_IS_TENSOR_VIEW(bias) ? bias->stride : 0, bias->info.dim, no_transpose, &bias_batch_size, &bias_rows, &bias_cols, &bias_batch_inc, &bias_rows_inc, &bias_cols_inc);
+			assert(bias_batch_size == 1);
+			assert(bias_cols == b_cols);
+			assert(CCV_IS_TENSOR_CONTIGUOUS(bias));
+			const void* const device_ones = ccv_nnc_stream_context_get_ones(stream_context, b_rows, b->info.datatype);
+			CUBLAS_ENFORCE(cublasGemmEx(cublas, CUBLAS_OP_N, CUBLAS_OP_N, b_cols, b_rows, 1, one, bias->data.u8, ccv_nnc_cuda_datatype(bias->info.datatype), bias_rows_inc, device_ones, ccv_nnc_cuda_datatype(b->info.datatype), 1, zero, b->data.u8, ccv_nnc_cuda_datatype(b->info.datatype), b_rows_inc, ccv_nnc_cuda_compute_datatype(b->info.datatype, is_downcast), CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+			CUBLAS_ENFORCE(cublasGemmEx(cublas, transa, transb, b_cols, b_rows, a_cols, one, w_data, ccv_nnc_cuda_datatype(w_datatype), lda_inc, a->data.u8, ccv_nnc_cuda_datatype(a->info.datatype), ldb_inc, one, b->data.u8, ccv_nnc_cuda_datatype(b->info.datatype), b_rows_inc, ccv_nnc_cuda_compute_datatype(b->info.datatype, is_downcast), CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+		} else {
+			CUBLAS_ENFORCE(cublasGemmEx(cublas, transa, transb, b_cols, b_rows, a_cols, one, w_data, ccv_nnc_cuda_datatype(w_datatype), lda_inc, a->data.u8, ccv_nnc_cuda_datatype(a->info.datatype), ldb_inc, zero, b->data.u8, ccv_nnc_cuda_datatype(b->info.datatype), b_rows_inc, ccv_nnc_cuda_compute_datatype(b->info.datatype, is_downcast), CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+		}
+	}
 	return CCV_NNC_EXEC_SUCCESS;
 }
 
@@ -622,7 +722,7 @@ static int _ccv_nnc_scaled_dot_product_attention_back(const ccv_nnc_cmd_t cmd, c
 
 	Flash_bwd_params params;
 	memset(&params, 0, sizeof(params));
-	params.is_bf16 = false;
+	params.is_bf16 = q->info.datatype == CCV_16BF;
 	params.q_ptr = q->data.u8;
 	params.k_ptr = k->data.u8;
 	params.v_ptr = v->data.u8;
@@ -727,7 +827,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_B
 {
 #ifdef HAVE_CUDA_SM80
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC;
-	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_scaled_dot_product_attention_forw;
@@ -740,7 +840,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD, CCV_NNC_
 {
 #ifdef HAVE_CUDA_SM80
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC;
-	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_scaled_dot_product_attention_back;

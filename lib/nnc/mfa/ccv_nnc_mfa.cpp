@@ -109,25 +109,7 @@ void mfa::cache<mfa::adam::hash, mfa::adam::pipeline>::prepare(mfa::context* con
 }
 
 template <>
-void mfa::cache<mfa::cmul::hash, mfa::cmul::pipeline>::prepare(mfa::context* context, mfa::cmul::hash hash)
-{
-  _mfa_cache_prepare(&map, context, hash);
-}
-
-template <>
 void mfa::cache<mfa::gemv::hash, mfa::gemv::pipeline>::prepare(mfa::context* context, mfa::gemv::hash hash)
-{
-  _mfa_cache_prepare(&map, context, hash);
-}
-
-template <>
-void mfa::cache<mfa::cast::hash, mfa::cast::pipeline>::prepare(mfa::context* context, mfa::cast::hash hash)
-{
-  _mfa_cache_prepare(&map, context, hash);
-}
-
-template <>
-void mfa::cache<mfa::add::hash, mfa::add::pipeline>::prepare(mfa::context* context, mfa::add::hash hash)
 {
   _mfa_cache_prepare(&map, context, hash);
 }
@@ -212,11 +194,14 @@ mfa::context::context(MTL::Device* device)
 
 MTL::Buffer* mfa::context::request_scratch(uint64_t size) {
   if (size > scratch->length()) {
-    uint64_t padded_size = std::max(int64_t(0), int64_t(size) - 1);
-    uint64_t leading_zeroes = __builtin_clzll(padded_size);
-    uint64_t rounded_size = 1 << uint64_t(64 - leading_zeroes);
-    
-    auto buffer = device->newBuffer(rounded_size, MTL::ResourceStorageModePrivate);
+    uint64_t rounded_size = size;
+    if (size < 0x20000000) { // If it is less than 512MiB, we pad it, otherwise we don't pad, just release & allocate. In this way, even we allocate a bit more, we allocate precisely what we need.
+      uint64_t padded_size = std::max(int64_t(0), int64_t(size) - 1);
+      uint64_t leading_zeroes = __builtin_clzll(padded_size);
+      rounded_size = (uint64_t)1 << uint64_t(64 - leading_zeroes);
+    }
+    this->scratch.reset();
+    auto buffer = device->newBuffer(rounded_size, MTL::ResourceStorageModePrivate | MTL::ResourceHazardTrackingModeTracked);
     CCV_NNC_MFA_PRECONDITION(buffer != nullptr);
     this->scratch = NS::TransferPtr(buffer);
   }
@@ -242,7 +227,9 @@ void MTL::CommandBatch::finishCommand(MTL::ComputeCommandEncoder* commandEncoder
 
 MTL::CommandBatch::~CommandBatch() {
   CCV_NNC_MFA_PRECONDITION(commandActive == 0)
-  commandEncoder->endEncoding();
+  if (commandEncoder) {
+    commandEncoder->endEncoding();
+  }
   if (commandBuffer) {
     commandBuffer->commit();
   }

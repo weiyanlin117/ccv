@@ -73,7 +73,6 @@ static int _ccv_nnc_pad_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 		const int* const end = cmd.info.pad.end;
 		const int g_nd = ccv_nnc_tensor_nd(g->info.dim);
 		assert(g_nd == ccv_nnc_tensor_nd(a->info.dim));
-		const int type = cmd.info.pad.type;
 		MPSGraphExecutable* executable = ccv_nnc_mps_graph_executable_cache(a_key, indices, ^void (MPSGraph* graph, NSMutableArray<MPSGraphTensor*>* inputTensors, NSMutableArray<MPSGraphShapedType*>* inputShapedTypes, NSMutableArray<MPSGraphTensor*>* resultTensors) {
 			MPSGraphTensor* mps_input_g;
 			MPSGraphTensor* mps_g = ccv_nnc_mps_graph_tensor_input(graph, g, g->info.dim, g->stride, &mps_input_g);

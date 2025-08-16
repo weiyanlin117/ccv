@@ -271,6 +271,21 @@ typedef struct {
 			int type; /**< [pad.type] The type of pad, can be either zeros or replicating edge. */
 			int end[CCV_NNC_MAX_DIM_ALLOC]; /**< [pad.end] Work together with size.dim. size.dim is how much to add at the beginning and pad.end is how much to add at the end. */
 		} pad;
+		struct {
+			int along_axis; /**< [sort.along_axis] Which axis to sort along with. */
+			int descending; /**< [sort.descending] Whether sorting by descending order. */
+		} sort;
+		struct {
+			int kth; /**< [partition.kth] How many items to retain after partition. */
+			int along_axis; /**< [partition.along_axis] Which axis to partition along with. */
+			int descending; /**< [partition.descending] Whether partitioning by descending order. */
+		} partition;
+		struct {
+			int bincount; /**< [unique_consecutive.bincount] Potentially how many unique items there will be, 0 if unknown. */
+		} unique_consecutive;
+		struct {
+			int bincount; /**< [scatter_add.bincount] Potentially how many unique items there will be, 0 if unknown. */
+		} scatter_add;
 		void* userdata;
 	};
 } ccv_nnc_cmd_param_t;
@@ -588,6 +603,14 @@ enum {
  */
 CCV_WARN_UNUSED(ccv_nnc_tensor_t*) ccv_nnc_tensor_new_from_file(const ccv_nnc_tensor_param_t params, const char* const filename, const off_t offset, const int flags);
 /**
+ * Create a new tensor with data from a pointer. This method handles copy to GPU implicitly.
+ * @param params Tensor parameters.
+ * @param bufptr The pointer to load tensor content from.
+ * @param flags Reserved flags for this loading.
+ * @return The newly created tensor.
+ */
+CCV_WARN_UNUSED(ccv_nnc_tensor_t*) ccv_nnc_tensor_new_from_raw(const ccv_nnc_tensor_param_t params, const void* const bufptr, const size_t buf_size, const int flags);
+/**
  * Create a new tensor on stack.
  * @param ptr If 0, nnc will allocate the tensor ourselves. Otherwise, will use the memory region referenced by 'ptr'.
  * @param params Tensor parameters.
@@ -711,6 +734,7 @@ int ccv_nnc_tensor_write(const ccv_nnc_tensor_t* const tensor, void* const handl
 
 enum {
 	CCV_NNC_TENSOR_READ_METADATA_ONLY = CCV_NO_DATA_ALLOC, /**< Read tensor that data is nil, with only metadata. */
+	CCV_NNC_TENSOR_READ_CPU_MEMORY = CCV_TENSOR_CPU_MEMORY, /**< Read tensor to CPU allocated buffer. */
 };
 /**
  * Read a tensor from a SQLite database with a given name.
@@ -887,10 +911,24 @@ CCV_WARN_UNUSED(int) ccv_nnc_cmd_enforce_inplace(const ccv_nnc_cmd_t cmd, const 
  */
 void ccv_nnc_set_profiler(int state);
 /**
- * When have choices between doing things, prefer to be more memory efficient and take performance hit. This is relevant to MPSGraph because if we dispatch all command buffers at full speed, we risk of holding a lot of resources up until all of them executed. Alternatively, we can wait previous one done before proceed, with obvious performance penalties.
- * @param state 1 is on, 0 is off. Default to off.
+ * Set the queue watermark when queueing up GPU commands. This is a Metal-only option.
+ * @param > 0 is how many in-flight GPU commands can have.
  */
-void ccv_nnc_set_memory_efficient(int state);
+void ccv_nnc_set_queue_watermark(int state);
+/**
+ * Get the queue watermark when queueing up GPU commands. This is a Metal-only option.
+ * @return How many in-flight GPU commands can have.
+ */
+CCV_WARN_UNUSED(int) ccv_nnc_queue_watermark(void);
+/**
+ * Set the device mapping to use custom order for device rather than driver imposed order. This is helpful
+ * to manage code where which GPU to use have no control over. The previous permutation is cleared up on
+ * each call and you can set 0 size device map to clear up all custom mapping.
+ * @param type Currently, only CCV_NNC_STREAM_CONTEXT_GPU on NVIDIA systems are supported.
+ * @param device_map The array of device map, maximum 64 devices.
+ * @param size The size of the array, only first 64 will be used.
+ */
+void ccv_nnc_set_device_permutation(const int type, const int* const device_map, const int size);
 /**
  * Quantize a given memory region of a given datatype / memory resides, into nbits palette.
  * @param input The input memory region, it can be CCV_64F, CCV_32F or CCV_16F.
@@ -1070,14 +1108,6 @@ void ccv_nnc_stream_signal_free(ccv_nnc_stream_signal_t* const signal);
  * @return The number of devices.
  */
 CCV_WARN_UNUSED(int) ccv_nnc_device_count(const int type);
-/**
- * Remap a source device as the destination device.
- * @param type The type of devices (CCV_NNC_STREAM_CONTEXT_GPU / CCV_NNC_STREAM_CONTEXT_CPU)
- * @param source The original device id.
- * @param destination The new device id.
- * @return 0 if the device remap is successful, -1 if it is not.
- */
-CCV_WARN_UNUSED(int) ccv_nnc_device_remap(const int type, const int source, const int destination);
 /**
  * The neighbor discovery function that will be called with the device id.
  */
@@ -1832,7 +1862,7 @@ int ccv_nnc_tensor_symbol_alias_params(const ccv_nnc_symbolic_graph_t* const gra
  * @param tensor The tensor symbol reference.
  * @param flags A reserved field for flags.
  */
-int ccv_nnc_tensor_symbol_set_flags(ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t tensor, const int flags);
+void ccv_nnc_tensor_symbol_set_flags(ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t tensor, const int flags);
 /**
  * Get all the flags for a tensor.
  * @param graph The symbolic graph.
@@ -3823,6 +3853,19 @@ void ccv_cnnp_model_apply_gradients(ccv_cnnp_model_t* const model, ccv_nnc_strea
  * @param model The composed model.
  */
 void ccv_cnnp_model_cancel(ccv_cnnp_model_t* const model);
+/**
+ * Set flags for the exec symbols created by the model. See CCV_NNC_GRAPH_EXEC_* for details.
+ * Note that practically right now, only DISABLE_OPT is useful.
+ * @param model The composed model before apply / evaluate.
+ * @param flags The flags to set on all exec symbols potentially associated with this model.
+ */
+void ccv_cnnp_model_set_flags(ccv_cnnp_model_t* const model, const int flags);
+/**
+ * Get flags for the exec symbols created by the model. See CCV_NNC_GRAPH_EXEC_* for details.
+ * Note that practically right now, only DISABLE_OPT is useful.
+ * @param model The composed model before apply / evaluate.
+ */
+CCV_WARN_UNUSED(int) ccv_cnnp_model_flags(ccv_cnnp_model_t* const model);
 enum {
 	/**
 	 * This is the default flag, if the model is not initialized, will attempt to read from the disk.
@@ -4002,6 +4045,36 @@ CCV_WARN_UNUSED(const char*) ccv_cnnp_model_parameter_name(ccv_cnnp_model_t* con
  * @return The number of parameters.
  */
 CCV_WARN_UNUSED(int) ccv_cnnp_model_parameter_count(ccv_cnnp_model_t* const model);
+/**
+ * This method returns the total byte size of parameters for this particular model. Note that this is only available after
+ * model is compiled.
+ * @param model A model that is compiled.
+ * @return The total byte size of parameters.
+ */
+CCV_WARN_UNUSED(uint64_t) ccv_cnnp_model_parameters_size(ccv_cnnp_model_t* const model);
+/**
+ * This method moved parameters of this particular model to designated device. It invalidates the parameters
+ * on a given model and requires to move back if the model needs to be used later.
+ * You can consider this as a counterpart for ccv_cnnp_model_parameter_copy, but operates on the whole model.
+ * @param model A model that is compiled.
+ * @param names The name associated with the tensor parameter.
+ * @param tensors The tensor associated with this parameter.
+ * @param count The size of the array provided for names and tensors, this should match ccv_cnnp_model_parameter_count call.
+ * @param type Either CCV_TENSOR_GPU_MEMORY or CCV_TENSOR_CPU_MEMORY.
+ * @return 1 for success.
+ */
+CCV_WARN_UNUSED(int) ccv_cnnp_model_parameters_move(ccv_cnnp_model_t* const model, char** const names, ccv_nnc_tensor_t** const tensors, const int count, const int type);
+/**
+ * This method moves or copies parameters from the array to this particular model to designated device.
+ * If it is a move, it invalidates the parameters in the array and leaves a "skeleton" tensor.
+ * You can consider this as a counterpart for ccv_cnnp_model_set_parameter, but operates on the whole model.
+ * @param model A model that is compiled.
+ * @param names The name associated with the tensor parameter.
+ * @param tensors The tensor associated with this parameter.
+ * @param count The size of the array provided for names and tensors, this should match ccv_cnnp_model_parameter_count call.
+ * @param invalidates Whether to invalidate the original tensor (1 - to invalidate, use move semantics if possible).
+ */
+void ccv_cnnp_model_set_parameters_from_key_values(ccv_cnnp_model_t* const model, char* const* const names, ccv_nnc_tensor_t** const tensors, const int count, const int invalidates);
 /**
  * Use this to loop over and if the parameter matches, return 1.
  */
@@ -4711,6 +4784,17 @@ CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_move(const char* const name);
  */
 CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_contiguous(const char* const name);
 /**
+ * If the input is a reshape, this model will make it a copy. Normally, such graph operation
+ * will be optimized away when calling ccv_nnc_symbolic_graph_simplify. In this case, we will disable
+ * such optimization on the generated node. This is useful mainly for memory conservation. In case you
+ * are working with a reshape of part of the tensor, make a explicit copy would make sure the original
+ * tensor is not retained therefore you can now give the compiler more optimization opportunities on
+ * memory conservation.
+ * @param name The unique name of the model.
+ * @return A model that can be applied and making a copy of the input.
+ */
+CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_copy(const char* const name);
+/**
  * Apply the scaled dot product attention to input. Accepting input in the form of (q, k, v)
  * or (q, k, v, attn_mask) if has_attn_mask is 1.
  * @param scale The scale to be applied to the qk dot product.
@@ -4752,6 +4836,48 @@ typedef void* (*ccv_cnnp_model_debug_context_copy_f)(void* const context);
  * @return A model that can be applied and copies first input to the second.
  */
 CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_debug(ccv_cnnp_model_debug_f func, void* const context, ccv_cnnp_model_debug_context_deinit_f deinit, ccv_cnnp_model_debug_context_copy_f copy, const char* const name);
+/**
+ * A sort model. The result are two tensors: values and indices.
+ * @param along_axis Sort along which axis.
+ * @param descending Whether sort by descending order.
+ * @param name The unique name of the model.
+ * @return A sort model.
+ */
+CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_sort(const int along_axis, const int descending, const char* const name);
+/**
+ * A partition model. The result are two tensors: values and indices.
+ * @param kth Took kth elements.
+ * @param along_axis Partition along which axis.
+ * @param descending Whether partition by descending order.
+ * @param name The unique name of the model.
+ * @return A partition model.
+ */
+CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_partition(const int kth, const int along_axis, const int descending, const char* const name);
+/**
+ * A unique consecutive model. Otherwise known as run-length encode.
+ * @param bincount How many unique consecutive elements there are, 0 to match the original.
+ * @param name The unique name of the model.
+ * @return A unique consecutive model.
+ */
+CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_unique_consecutive(const int bincount, const char* const name);
+/**
+ * A scatter add model.
+ * @param name The unique name of the model.
+ * @param bincount How many original elements will be, it needs to be non-zero.
+ * @return A scatter add model.
+ */
+CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_scatter_add(const int bincount, const char* const name);
+/**
+ * A segmented dense layer model. Note that the input would be activation, indices and count.
+ * @param segments / experts How many segments in this layer.
+ * @param count The output dimension.
+ * @param no_bias Whether has a bias term or not.
+ * @param flags The flags to disable / enable certain features.
+ * @param is_trainable Whether the parameters of this model can be trained.
+ * @param name The unique name of the model.
+ * @return A segmented dense layer model.
+ */
+CCV_WARN_UNUSED(ccv_cnnp_model_t*) ccv_cnnp_segmented_dense(const int segments, const int count, const int no_bias, const int flags, const int is_trainable, const char* const name);
 
 /** @} */
 

@@ -14,6 +14,8 @@
 #include "ccv_internal.h"
 #include "nnc/ccv_nnc.h"
 
+void ccv_nnc_drain_autotune_cache(void);
+
 // Define some internal constraints
 
 #define CCV_NNC_STACK_BITMASK_ALLOC (2)
@@ -41,15 +43,15 @@ typedef struct {
 	void* aux; /**< [aux] The additional information available for a particular command under a particular backend. */
 } ccv_nnc_cmd_backend_registry_t;
 
-static inline int ccv_nnc_tensor_hw(const ccv_nnc_tensor_param_t a, const int nd)
+static inline int ccv_nnc_tensor_hw(const ccv_nnc_tensor_param_t a, const int nd, const int size_nd)
 {
 	if ((a.format == CCV_TENSOR_FORMAT_CHWN) ||
-		(a.format == CCV_TENSOR_FORMAT_NHWC && nd == CCV_NNC_MAX_DIM + 1))
+		(a.format == CCV_TENSOR_FORMAT_NHWC && nd == size_nd + 1))
 		return 0;
-	else if ((a.format == CCV_TENSOR_FORMAT_NHWC && nd == CCV_NNC_MAX_DIM + 2) ||
-			 (a.format == CCV_TENSOR_FORMAT_NCHW && nd == CCV_NNC_MAX_DIM + 1))
+	else if ((a.format == CCV_TENSOR_FORMAT_NHWC && nd == size_nd + 2) ||
+			 (a.format == CCV_TENSOR_FORMAT_NCHW && nd == size_nd + 1))
 		return 1;
-	else if (a.format == CCV_TENSOR_FORMAT_NCHW && nd == CCV_NNC_MAX_DIM + 2)
+	else if (a.format == CCV_TENSOR_FORMAT_NCHW && nd == size_nd + 2)
 		return 2;
 	return -1;
 }
@@ -59,10 +61,12 @@ static inline void ccv_nnc_hint_tensor_forward(const ccv_nnc_cmd_param_t cmd, co
 	int i;
 	assert(a.format == b->format);
 	const int nd = ccv_nnc_tensor_nd(a.dim);
-	assert(nd == CCV_NNC_MAX_DIM + 1 || nd == CCV_NNC_MAX_DIM + 2);
-	int hw = ccv_nnc_tensor_hw(a, nd);
+	const int size_nd = ccv_nnc_tensor_nd(cmd.size.dim) - 1;
+	assert(size_nd == 2 || size_nd == 3); // Support 3D convolution.
+	assert(nd == size_nd + 1 || nd == size_nd + 2);
+	int hw = ccv_nnc_tensor_hw(a, nd, size_nd);
 	assert(hw >= 0);
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < size_nd; i++)
 	{
 		int stride = ccv_max(1, hint.stride.dim[i]);
 		b->dim[i + hw] = (a.dim[i + hw] + hint.border.begin[i] + hint.border.end[i] - cmd.size.dim[i]) / stride + 1;
@@ -74,10 +78,12 @@ static inline void ccv_nnc_hint_tensor_backward(const ccv_nnc_cmd_param_t cmd, c
 	int i;
 	assert(a.format == b->format);
 	const int nd = ccv_nnc_tensor_nd(a.dim);
-	assert(nd == CCV_NNC_MAX_DIM + 1 || nd == CCV_NNC_MAX_DIM + 2);
-	int hw = ccv_nnc_tensor_hw(a, nd);
+	const int size_nd = ccv_nnc_tensor_nd(cmd.size.dim) - 1;
+	assert(size_nd == 2 || size_nd == 3); // Support 3D convolution.
+	assert(nd == size_nd + 1 || nd == size_nd + 2);
+	int hw = ccv_nnc_tensor_hw(a, nd, size_nd);
 	assert(hw >= 0);
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < size_nd; i++)
 	{
 		int stride = ccv_max(1, hint.stride.dim[i]);
 		b->dim[i + hw] = (a.dim[i + hw] - 1) * stride - hint.border.begin[i] - hint.border.end[i] + cmd.size.dim[i];
@@ -459,6 +465,16 @@ static inline void ccv_nnc_graph_visit_free(ccv_nnc_graph_visit_t* graph_visit)
 
 #define ccv_nnc_graph_visit_for(graph_visit, nodes, ...) \
 	CCV_NNC_GRAPH_VISIT_FOR1(graph_visit, nodes, ##__VA_ARGS__, _node_unused_, _index_unused_, _term_unused_)
+
+#define CCV_NNC_GRAPH_VISIT_FOR1_REVERSED(graph_visit, nodes, _node_, _index_, _term_, ...) { \
+	int _i_; \
+	for (_i_ = (graph_visit)->size - 1; _i_ >= 0; _i_--) { \
+		const int _index_ __attribute__((unused)) = (graph_visit)->node[_i_].index; \
+		const int _term_ __attribute__((unused)) = (graph_visit)->node[_i_].term; \
+		typeof ((nodes)) const _node_ __attribute__((unused)) = (nodes) + _index_; \
+
+#define ccv_nnc_graph_visit_for_reversed(graph_visit, nodes, ...) \
+	CCV_NNC_GRAPH_VISIT_FOR1_REVERSED(graph_visit, nodes, ##__VA_ARGS__, _node_unused_, _index_unused_, _term_unused_)
 
 #define ccv_nnc_graph_visit_endfor } }
 

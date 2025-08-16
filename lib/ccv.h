@@ -67,7 +67,11 @@ static const ssize_t _ccv_get_data_type_size[] = {
 	-1, -1, -1, -1, -1, -1, -1, 8,
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2,
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2
 };
 
 #define CCV_GET_DATA_TYPE(x) ((x) & 0xFF000)
@@ -885,9 +889,21 @@ ccv_dense_matrix_t ccv_reshape(ccv_dense_matrix_t* a, int y, int x, int rows, in
 void ccv_float_to_half_precision(const float* f, uint16_t* h, size_t len);
 void ccv_half_precision_to_float(const uint16_t* h, float* f, size_t len);
 
+// 32-bit float to 16-bit bfloat
+void ccv_float_to_bfloat(const float* f, uint16_t* h, size_t len);
+void ccv_bfloat_to_float(const uint16_t* h, float* f, size_t len);
+
 // 64-bit float to 16-bit float
 void ccv_double_to_half_precision(const double* f, uint16_t* h, size_t len);
 void ccv_half_precision_to_double(const uint16_t* h, double* f, size_t len);
+
+// 64-bit float to 16-bit bfloat
+void ccv_double_to_bfloat(const double* f, uint16_t* h, size_t len);
+void ccv_bfloat_to_double(const uint16_t* h, double* f, size_t len);
+
+// 16-bit float to 16-bit bfloat
+void ccv_bfloat_to_half_precision(const uint16_t* h, uint16_t* f, size_t len);
+void ccv_half_precision_to_bfloat(const uint16_t* f, uint16_t* h, size_t len);
 
 /* basic data structures ccv_util.c */
 

@@ -4506,7 +4506,7 @@ if [ -d "$cuda_prefix" ]; then
 	DEFINE_MACROS="$DEFINE_MACROS-D HAVE_CUDA "
 
 	# CUB requires stdc++, unfortunately.
-	MKLDFLAGS="$MKLDFLAGS-lcudart -lcublas -lcurand -lstdc++ "
+	MKLDFLAGS="$MKLDFLAGS-lcudart -lcublas -lcurand -lcufile -lstdc++ "
 
 	CPPFLAGS="$CPPFLAGS-I$cuda_prefix/include "
 
@@ -4760,7 +4760,7 @@ if test "$mps_support" = yes; then
 printf "%s\n" "yes" >&6; }
 	DEFINE_MACROS="$DEFINE_MACROS-D HAVE_MPS "
 
-	MKLDFLAGS="$MKLDFLAGS-framework MetalPerformanceShaders -framework MetalPerformanceShadersGraph -framework Foundation -framework Metal -framework OpenCL -lc++ "
+	MKLDFLAGS="$MKLDFLAGS-framework MetalPerformanceShaders -framework MetalPerformanceShadersGraph -framework Foundation -framework Metal -lc++ "
 
 	CUDA_SRCS=""
 

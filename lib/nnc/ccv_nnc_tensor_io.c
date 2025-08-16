@@ -114,13 +114,13 @@ int ccv_nnc_tensor_write(const ccv_nnc_tensor_t* const tensor, void* const handl
 	sqlite3_bind_int(tensor_insert_stmt, 3, params.format);
 	sqlite3_bind_int64(tensor_insert_stmt, 4, ((sqlite_int64)params.reserved << 32) | params.datatype);
 	sqlite3_bind_blob(tensor_insert_stmt, 5, params.dim, sizeof(params.dim), 0);
-	sqlite3_step(tensor_insert_stmt);
+	const int result = sqlite3_step(tensor_insert_stmt);
 	sqlite3_reset(tensor_insert_stmt);
 	sqlite3_clear_bindings(tensor_insert_stmt);
 	sqlite3_finalize(tensor_insert_stmt);
 	if (workspace)
 		free(workspace);
-	return CCV_IO_FINAL;
+	return result == SQLITE_DONE ? CCV_IO_FINAL : CCV_IO_ERROR;
 }
 
 int ccv_nnc_tensor_read(void* const handle, const char* const name, const ccv_nnc_tensor_io_option_t* const options, const int flags, const ccv_nnc_tensor_param_t* const tensor_params_optional, ccv_nnc_tensor_t** const tensor_out)
@@ -163,6 +163,8 @@ int ccv_nnc_tensor_read(void* const handle, const char* const name, const ccv_nn
 			const void* const dim = sqlite3_column_blob(tensor_select_stmt, 4);
 			memcpy(tensor_params.dim, dim, ccv_min(sizeof(tensor_params.dim), sqlite3_column_bytes(tensor_select_stmt, 4)));
 		}
+		if (flags & CCV_NNC_TENSOR_READ_CPU_MEMORY) // Reset type to CPU memory.
+			tensor_params.type = (tensor_params.type & 0xfff00000) | CCV_TENSOR_CPU_MEMORY;
 		if (!options || !options->decode)
 		{
 			if (flags & CCV_NNC_TENSOR_READ_METADATA_ONLY)

@@ -25,9 +25,21 @@ static int _ccv_nnc_conv_transpose_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 	assert(output_size == 1);
 	cudnnHandle_t cudnn = ccv_nnc_stream_context_get_cudnn(stream_context);
 	const ccv_nnc_cudnn_tensor_view_descriptor_t a = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)inputs[0]);
-	const ccv_nnc_cudnn_filter_descriptor_t w = ccv_nnc_cudnn_get_filter_descriptor(stream_context, (const ccv_nnc_tensor_t*)inputs[1]);
-	const ccv_nnc_cudnn_tensor_view_descriptor_t b = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)outputs[0]);
 	const int is_w_nhwc = inputs[1]->info.format == CCV_TENSOR_FORMAT_NHWC;
+	ccv_nnc_tensor_view_t w_tensor = ccv_nnc_get_tensor_view(inputs[1]);
+	if (!is_w_nhwc && inputs[0]->info.format == CCV_TENSOR_FORMAT_NHWC)
+	{
+		assert(w_tensor.info.format == CCV_TENSOR_FORMAT_NCHW);
+		const int w_nd = ccv_nnc_tensor_nd(w_tensor.info.dim);
+		w_tensor.info.format = CCV_TENSOR_FORMAT_NHWC;
+		const int c = w_tensor.info.dim[1]; // W must be NCHW.
+		int i;
+		for (i = 1; i < w_nd - 1; i++)
+			w_tensor.info.dim[i] = w_tensor.info.dim[i + 1];
+		w_tensor.info.dim[w_nd - 1] = c;
+	}
+	const ccv_nnc_cudnn_filter_descriptor_t w = ccv_nnc_cudnn_get_filter_descriptor(stream_context, (const ccv_nnc_tensor_t*)&w_tensor);
+	const ccv_nnc_cudnn_tensor_view_descriptor_t b = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)outputs[0]);
 	const int w_datatype = inputs[1]->info.datatype;
 	const ccv_nnc_cudnn_convolution_descriptor_t conv = ccv_nnc_cudnn_get_convolution_descriptor(stream_context, cmd.info, hint, (is_w_nhwc && w_datatype == CCV_16F) ? CCV_32F : w_datatype);
 	cudnnSetConvolutionGroupCount(conv.descriptor, cmd.info.convolution_transpose.groups);
@@ -67,29 +79,72 @@ static int _ccv_nnc_conv_transpose_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 	}
 	size_t workspace_size = 0;
 	CUDNN_ENFORCE(cudnnGetConvolutionBackwardDataWorkspaceSize(cudnn, w.descriptor, a.descriptor, conv.descriptor, b.descriptor, data_algo, &workspace_size));
+	ccv_nnc_tensor_prefetch_async(inputs[0], stream_context);
+	ccv_nnc_tensor_prefetch_async(inputs[1], stream_context);
+	if (input_size > 2 && inputs[2])
+		ccv_nnc_tensor_prefetch_async(inputs[2], stream_context);
 	void* workspace = 0;
 	void* weight_data = w.data.u8;
-	if (CCV_GET_DATA_TYPE(inputs[2]->info.datatype) == CCV_QX)
+	if (!is_w_nhwc && inputs[0]->info.format == CCV_TENSOR_FORMAT_NHWC) // If W is not in NHWC format while the activation is in NHWC, we first need to transform w into the said format.
 	{
-		ccv_nnc_tensor_param_t weight_params = inputs[2]->info;
-		const size_t count = ccv_nnc_tensor_count(weight_params);
-		const int palette_datatype = (weight_params.datatype & 0xff) << 12;
-		const int qbits = (weight_params.datatype & 0xf00) >> 8;
-		const int number_in_blocks = weight_params.reserved;
-		ccv_nnc_tensor_param_t depalettize_weight_params = weight_params;
-		depalettize_weight_params.datatype = palette_datatype;
-		depalettize_weight_params.reserved = 0;
-		const size_t data_size = ccv_nnc_tensor_data_size(depalettize_weight_params);
-		workspace_size = ((ssize_t)workspace_size + 1023) & -1024; // Somehow the workspace size is not padded. We need to pad it for weight_data to be aligned.
-		workspace = ccv_nnc_stream_context_get_workspace(stream_context, workspace_size + data_size, CCV_TENSOR_GPU_MEMORY);
-		weight_data = (uint8_t*)workspace + workspace_size;
-		ccv_nnc_compat_depalettize(w.data.u8, palette_datatype, ccv_nnc_tensor_data_size_without_padding(weight_params), qbits, number_in_blocks, weight_data, count, stream_context);
-		if (workspace_size == 0)
-			workspace = 0;
+		ccv_nnc_tensor_param_t weight_params = inputs[1]->info;
+		if (CCV_GET_DATA_TYPE(weight_params.datatype) == CCV_QX)
+		{
+			const size_t count = ccv_nnc_tensor_count(weight_params);
+			const int palette_datatype = (weight_params.datatype & 0xff) << 12;
+			const int qbits = (weight_params.datatype & 0xf00) >> 8;
+			const int number_in_blocks = weight_params.reserved;
+			ccv_nnc_tensor_param_t depalettize_weight_params = weight_params;
+			depalettize_weight_params.datatype = palette_datatype;
+			depalettize_weight_params.reserved = 0;
+			const size_t data_size = ccv_nnc_tensor_data_size(depalettize_weight_params);
+			workspace_size = ((ssize_t)workspace_size + 1023) & -1024; // Somehow the workspace size is not padded. We need to pad it for weight_data to be aligned.
+			workspace = ccv_nnc_stream_context_get_workspace(stream_context, workspace_size + data_size * 2, CCV_TENSOR_GPU_MEMORY);
+			void* orig_weight_data = (uint8_t*)workspace + workspace_size + data_size;
+			ccv_nnc_compat_depalettize(w.data.u8, palette_datatype, ccv_nnc_tensor_data_size_without_padding(weight_params), qbits, number_in_blocks, orig_weight_data, count, stream_context);
+			const ccv_nnc_cudnn_tensor_view_descriptor_t orig_w = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)inputs[1]);
+			const ccv_nnc_cudnn_tensor_view_descriptor_t new_w = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, &w_tensor);
+			static const float one = 1, zero = 0;
+			weight_data = (uint8_t*)workspace + workspace_size;
+			CUDNN_ENFORCE(cudnnTransformTensor(cudnn, &one, orig_w.descriptor, orig_weight_data, &zero, new_w.descriptor, weight_data));
+			if (workspace_size == 0)
+				workspace = 0;
+		} else {
+			const size_t data_size = ccv_nnc_tensor_data_size(weight_params);
+			workspace_size = ((ssize_t)workspace_size + 1023) & -1024; // Somehow the workspace size is not padded. We need to pad it for weight_data to be aligned.
+			workspace = ccv_nnc_stream_context_get_workspace(stream_context, workspace_size + data_size, CCV_TENSOR_GPU_MEMORY);
+			const ccv_nnc_cudnn_tensor_view_descriptor_t orig_w = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)inputs[1]);
+			const ccv_nnc_cudnn_tensor_view_descriptor_t new_w = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, &w_tensor);
+			static const float one = 1, zero = 0;
+			weight_data = (uint8_t*)workspace + workspace_size;
+			CUDNN_ENFORCE(cudnnTransformTensor(cudnn, &one, orig_w.descriptor, orig_w.data.u8, &zero, new_w.descriptor, weight_data));
+			if (workspace_size == 0)
+				workspace = 0;
+		}
+
 	} else {
-		// TODO: If error, return OOM
-		if (workspace_size)
-			workspace = ccv_nnc_stream_context_get_workspace(stream_context, workspace_size, CCV_TENSOR_GPU_MEMORY);
+		if (CCV_GET_DATA_TYPE(inputs[1]->info.datatype) == CCV_QX)
+		{
+			ccv_nnc_tensor_param_t weight_params = inputs[1]->info;
+			const size_t count = ccv_nnc_tensor_count(weight_params);
+			const int palette_datatype = (weight_params.datatype & 0xff) << 12;
+			const int qbits = (weight_params.datatype & 0xf00) >> 8;
+			const int number_in_blocks = weight_params.reserved;
+			ccv_nnc_tensor_param_t depalettize_weight_params = weight_params;
+			depalettize_weight_params.datatype = palette_datatype;
+			depalettize_weight_params.reserved = 0;
+			const size_t data_size = ccv_nnc_tensor_data_size(depalettize_weight_params);
+			workspace_size = ((ssize_t)workspace_size + 1023) & -1024; // Somehow the workspace size is not padded. We need to pad it for weight_data to be aligned.
+			workspace = ccv_nnc_stream_context_get_workspace(stream_context, workspace_size + data_size, CCV_TENSOR_GPU_MEMORY);
+			weight_data = (uint8_t*)workspace + workspace_size;
+			ccv_nnc_compat_depalettize(w.data.u8, palette_datatype, ccv_nnc_tensor_data_size_without_padding(weight_params), qbits, number_in_blocks, weight_data, count, stream_context);
+			if (workspace_size == 0)
+				workspace = 0;
+		} else {
+			// TODO: If error, return OOM
+			if (workspace_size)
+				workspace = ccv_nnc_stream_context_get_workspace(stream_context, workspace_size, CCV_TENSOR_GPU_MEMORY);
+		}
 	}
 	static const float one = 1, zero = 0;
 	CUDNN_ENFORCE(cudnnConvolutionBackwardData(cudnn, &one, w.descriptor, weight_data, a.descriptor, a.data.u8, conv.descriptor, data_algo, workspace, workspace_size, &zero, b.descriptor, b.data.u8));
@@ -115,9 +170,21 @@ static int _ccv_nnc_conv_transpose_forw_autotune(const ccv_nnc_cmd_t cmd, size_t
 	if (max_workspace_size && !workmem)
 		return -1;
 	const ccv_nnc_cudnn_tensor_view_descriptor_t a = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)inputs[0]);
-	const ccv_nnc_cudnn_filter_descriptor_t w = ccv_nnc_cudnn_get_filter_descriptor(stream_context, (const ccv_nnc_tensor_t*)inputs[1]);
-	const ccv_nnc_cudnn_tensor_view_descriptor_t b = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)outputs[0]);
 	const int is_w_nhwc = inputs[1]->info.format == CCV_TENSOR_FORMAT_NHWC;
+	ccv_nnc_tensor_view_t w_tensor = ccv_nnc_get_tensor_view(inputs[1]);
+	if (!is_w_nhwc && inputs[0]->info.format == CCV_TENSOR_FORMAT_NHWC)
+	{
+		assert(w_tensor.info.format == CCV_TENSOR_FORMAT_NCHW);
+		const int w_nd = ccv_nnc_tensor_nd(w_tensor.info.dim);
+		w_tensor.info.format = CCV_TENSOR_FORMAT_NHWC;
+		const int c = w_tensor.info.dim[1]; // W must be NCHW.
+		int i;
+		for (i = 1; i < w_nd - 1; i++)
+			w_tensor.info.dim[i] = w_tensor.info.dim[i + 1];
+		w_tensor.info.dim[w_nd - 1] = c;
+	}
+	const ccv_nnc_cudnn_filter_descriptor_t w = ccv_nnc_cudnn_get_filter_descriptor(stream_context, (const ccv_nnc_tensor_t*)&w_tensor);
+	const ccv_nnc_cudnn_tensor_view_descriptor_t b = ccv_nnc_cudnn_get_tensor_view_descriptor(stream_context, (const ccv_nnc_tensor_view_t*)outputs[0]);
 	const int w_datatype = inputs[1]->info.datatype;
 	const ccv_nnc_cudnn_convolution_descriptor_t conv = ccv_nnc_cudnn_get_convolution_descriptor(stream_context, cmd.info, hint, (is_w_nhwc && w_datatype == CCV_16F) ? CCV_32F : w_datatype);
 	cudnnSetConvolutionGroupCount(conv.descriptor, cmd.info.convolution.groups);

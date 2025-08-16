@@ -1,5 +1,7 @@
 #include "ccv_nnc_mfa.hpp"
 #include "ccv_nnc_mfa_hash.hpp"
+#include "v2/AddDescriptor.hpp"
+#include "v2/AddKernel.hpp"
 #include <simd/simd.h>
 using namespace ccv::nnc;
 
@@ -9,18 +11,11 @@ using namespace ccv::nnc;
 
 void ccv_nnc_mfa_prepare_add(mfa::context* context, ccv_nnc_mfa_add_params_t params)
 {
-  context->add_cache.prepare(context, mfa::add::hash(params));
+  // Do nothing now.
 }
 
 void ccv_nnc_mfa_encode_add(ccv_nnc_mfa_context_t* context, ccv_nnc_mfa_add_params_t params, mtl_command_batch_t* command_batch, mtl_buffer_t** tensors, size_t* tensor_offsets)
 {
-  mfa::add::hash hash(params);
-  auto iterator = context->add_cache.map.find(hash);
-  if (iterator == context->add_cache.map.end()) {
-    mfa::precondition_failure("add hash not cached.", __LINE__, __FILE__, __FUNCTION__);
-  }
-  
-  auto* pipeline = iterator->second;
   auto encoder = command_batch->startCommand();
   
   int num_tensors = 0;
@@ -28,163 +23,60 @@ void ccv_nnc_mfa_encode_add(ccv_nnc_mfa_context_t* context, ccv_nnc_mfa_add_para
     encoder->setBuffer(tensors[num_tensors], tensor_offsets[num_tensors], NS::UInteger(num_tensors));
     num_tensors += 1;
   }
-  CCV_NNC_MFA_PRECONDITION(num_tensors == 3);
-  
-  encoder->setComputePipelineState(pipeline->add_pso.get());
-  encoder->useResource(tensors[0], MTL::ResourceUsageRead);
-  encoder->useResource(tensors[1], MTL::ResourceUsageRead);
-  encoder->useResource(tensors[2], MTL::ResourceUsageWrite);
+  CCV_NNC_MFA_PRECONDITION(num_tensors == 1 + params.args);
 
-  auto grid_size = pipeline->grid_size;
-  CCV_NNC_MFA_PRECONDITION(grid_size.depth > 0);
-  encoder->dispatchThreadgroups(grid_size, pipeline->group_size);
-  command_batch->finishCommand(encoder);
-}
-
-// MARK: - C++
-
-mfa::add::hash::hash(ccv_nnc_mfa_add_params_t params) {
-  data_type = params.data_type;
-  length = params.length;
-}
-
-bool mfa::add::hash::operator==(const mfa::add::hash& hash) const {
-  return (data_type == hash.data_type) && (length == hash.length);
-}
-
-std::ostream& operator<<(std::ostream& os, const mfa::add::hash& hash) {
-  os << "mfa::add::hash {";
-  os << " .data_type = " << hash.data_type << ',';
-  os << " .length = " << hash.length << " ";
-  os << "}";
-  return os;
-}
-
-std::size_t std::hash<mfa::add::hash>::operator()(const mfa::add::hash& hash) const noexcept {
-  std::size_t seed = 0;
-  using namespace mfa::hash;
-  combine_64(seed, hash.data_type);
-  combine_32(seed, hash.length);
-  return seed;
-}
-
-mfa::add::pipeline::pipeline(mfa::context* context, mfa::add::hash hash) {
-  CCV_NNC_MFA_PRECONDITION((hash.data_type == MTL::DataTypeFloat) || (hash.data_type == MTL::DataTypeHalf))
-  
-  auto* pool = NS::AutoreleasePool::alloc()->init();
-  
-  std::string shader;
-  // In this case, we can igore the boundary check.
-  if (hash.length % (4 * 256) == 0) {
-    shader = R"(
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void add(
-  device const real4 *src0 [[buffer(0)]],
-  device const real4 *src1 [[buffer(1)]],
-  device real4 *dst [[buffer(2)]],
-
-  uint3 tpig [[thread_position_in_grid]]
-) {
-  const uint idx = tpig.x;
-  dst[idx] = src0[idx] + src1[idx];
-}
-    )";
-  } else if (hash.length % 4 == 0) {
-    shader = R"(
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void add(
-  device const real4 *src0 [[buffer(0)]],
-  device const real4 *src1 [[buffer(1)]],
-  device real4 *dst [[buffer(2)]],
-
-  uint3 tpig [[thread_position_in_grid]]
-) {
-  const uint idx = tpig.x;
-  if (idx >= count)
-    return;
-  dst[idx] = src0[idx] + src1[idx];
-}
-    )";
+  AddDescriptor descriptor;
+  descriptor.args = params.args;
+  if (params.data_type == MTL::DataTypeFloat) {
+    descriptor.memoryPrecision = GEMMOperandPrecision::FP32;
+  } else if (params.data_type == MTL::DataTypeBFloat) {
+    descriptor.memoryPrecision = GEMMOperandPrecision::BF16;
   } else {
-    shader = R"(
-#include <metal_stdlib>
-using namespace metal;
+    descriptor.memoryPrecision = GEMMOperandPrecision::FP16;
+  }
+  descriptor.length = params.length;
 
-kernel void add(
-  device const real *src0 [[buffer(0)]],
-  device const real *src1 [[buffer(1)]],
-  device real *dst [[buffer(2)]],
-
-  uint3 tpig [[thread_position_in_grid]]
-) {
-  const uint idx = tpig.x;
-  if (idx >= count)
-    return;
-  dst[idx] = src0[idx] + src1[idx];
-}
-    )";
+  if (params.length % (4 * 256) == 0) {
+    descriptor.value = 0;
+  } else if (params.length % 4 == 0) {
+    descriptor.value = 1;
+  } else {
+    descriptor.value = 2;
   }
 
-  std::string defines = "";
-  if (hash.data_type == MTL::DataTypeFloat) {
-    defines += std::string("typedef float4 real4;");
-    defines += "\n";
-    defines += std::string("typedef float real;");
-    defines += "\n";
-  } else {
-    defines += std::string("typedef half4 real4;");
-    defines += "\n";
-    defines += std::string("typedef half real;");
-    defines += "\n";
+  auto pool = NS::AutoreleasePool::alloc()->init();
+  auto &shaderCache = context->v2_cache;
+  DeviceProperties dprops = DeviceProperties();
+  auto pipelineValue = shaderCache.findKernel<AddKernel, AddDescriptor, AddKernelDescriptor>(descriptor, context->device.get(), dprops);
+  pool->drain();
+  auto kernel = pipelineValue->kernel;
+  auto pipeline = pipelineValue->pipeline;
+
+  encoder->setComputePipelineState(pipeline.get());
+  
+  int i;
+  int flag = 0;
+  for (i = 0; i < params.args; i++) {
+    if (tensors[i] == tensors[params.args]) {
+      encoder->useResource(tensors[i], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+      flag = 1;
+	} else {
+      encoder->useResource(tensors[i], MTL::ResourceUsageRead);
+	}
+  }
+  if (!flag) {
+    encoder->useResource(tensors[params.args], MTL::ResourceUsageWrite);
   }
 
   unsigned int count;
-  if (hash.length % 4 == 0) {
-    count = hash.length / 4;
+  if (params.length % 4 == 0) {
+    count = params.length / 4;
   } else {
-    count = hash.length;
+    count = params.length;
   }
-  // Only boundary check needs this const in the shader.
-  if (hash.length % (4 * 256) != 0) {
-    defines += "constant uint count = ";
-    defines += std::to_string(count) + ";";
-    defines += "\n";
-  }
-  this->group_size = MTL::Size(256, 1, 1);
   const int num_blocks = (count + 255) / 256;
-  this->grid_size = MTL::Size(num_blocks, 1, 1);
-
-  auto constants = NS::TransferPtr(MTL::FunctionConstantValues::alloc()->init());
-  NS::SharedPtr<MTL::ComputePipelineState>* pso = &add_pso;
-
-  std::string source = defines;
-  if (METAL_LOG_LEVEL(context) >= 4) {
-    std::cerr << source << std::endl;
-  }
-  source += shader;
-
-  NS::Error *error = nullptr;
-  auto swift_source = NS::String::string(source.c_str(),
-  NS::UTF8StringEncoding);
-  auto library = NS::TransferPtr(context->device->newLibrary(swift_source, nullptr, &error));
-  if (!library) {
-    CCV_NNC_MFA_CHECK_ERROR(error)
-  }
-    
-  auto swift_name = NS::String::string("add", NS::UTF8StringEncoding);
-  auto function = NS::TransferPtr(library->newFunction(swift_name, constants.get(), &error));
-  if (!function) {
-    CCV_NNC_MFA_CHECK_ERROR(error)
-  }
-    
-  *pso = NS::TransferPtr(context->device->newComputePipelineState(function.get(), &error));
-  if (!*pso) {
-    CCV_NNC_MFA_CHECK_ERROR(error)
-  }
-  
-  pool->drain();
+  MTL::Size gridSize = MTL::Size(num_blocks, 1, 1);
+  CCV_NNC_MFA_PRECONDITION(gridSize.depth > 0);
+  encoder->dispatchThreadgroups(gridSize, kernel->threadgroupSize);
+  command_batch->finishCommand(encoder);
 }

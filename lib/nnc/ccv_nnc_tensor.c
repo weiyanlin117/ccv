@@ -129,14 +129,24 @@ ccv_nnc_tensor_t* ccv_nnc_tensor_new_from_file(const ccv_nnc_tensor_param_t para
 		assert(CCV_TENSOR_GET_DEVICE(params.type) != CCV_COMPUTE_DEVICE_ANY);
 		if (size > 0)
 		{
+			void* ptr = 0;
 			// This is not supported yet on CUDA.
-			tensor->data.u8 = (uint8_t*)cumalloc(CCV_TENSOR_GET_DEVICE_ID(params.type), size);
-			int fd = open(filename, O_RDONLY, 0);
-			void* bufptr = mmap(0, size, PROT_READ, MAP_PRIVATE, fd, offset);
-			close(fd);
-			madvise(bufptr, size, MADV_SEQUENTIAL | MADV_WILLNEED);
-			cumemcpy(tensor->data.u8, CCV_TENSOR_GPU_MEMORY, bufptr, CCV_TENSOR_CPU_MEMORY, size);
-			munmap(bufptr, size);
+			if (flags & CCV_NNC_TENSOR_MEMORY_MAP_ON_DEMAND)
+				ptr = cumallocmanaged(CCV_TENSOR_GET_DEVICE_ID(params.type), size);
+			if (ptr) // If allocated successfully. Otherwise we go through the fallback path.
+			{
+				tensor->data.u8 = (uint8_t*)ptr;
+				int fd = open(filename, O_RDONLY, 0);
+				cufileread(fd, offset, tensor->data.u8, size);
+				close(fd);
+				cumemadvisereadmostly(CCV_TENSOR_GET_DEVICE_ID(params.type), tensor->data.u8, size);
+				tensor->type |= CCV_MAPPED_MEM; // This denotes the tensor is mapped to CPU, and would prefer a explicit prefetch call.
+			} else {
+				tensor->data.u8 = (uint8_t*)cumalloc(CCV_TENSOR_GET_DEVICE_ID(params.type), size);
+				int fd = open(filename, O_RDONLY, 0);
+				cufileread(fd, offset, tensor->data.u8, size);
+				close(fd);
+			}
 		} else
 			tensor->data.u8 = 0;
 	} else {
@@ -186,6 +196,54 @@ ccv_nnc_tensor_t* ccv_nnc_tensor_new_from_file(const ccv_nnc_tensor_param_t para
 		tensor->data.u8 = bufptr;
 		tensor->type |= CCV_MAPPED_MEM;
 	} else
+		tensor->data.u8 = 0;
+#endif
+	return tensor;
+}
+
+ccv_nnc_tensor_t* ccv_nnc_tensor_new_from_raw(const ccv_nnc_tensor_param_t params, const void* const bufptr, const size_t buf_size, const int flags)
+{
+	ccv_nnc_tensor_t* tensor = ccv_nnc_tensor_new(0, params, flags);
+	const size_t size = ccv_min(ccv_nnc_tensor_data_size_without_padding(params), buf_size);
+#ifdef HAVE_CUDA
+	if (CCV_TENSOR_GET_MEMORY(params.type) == CCV_TENSOR_GPU_MEMORY)
+	{
+		// Remove this flag so it can be deallocated as usual.
+		tensor->type &= ~CCV_NO_DATA_ALLOC;
+		assert(CCV_TENSOR_GET_DEVICE(params.type) != CCV_COMPUTE_DEVICE_ANY);
+		if (size > 0)
+			cumemcpy(tensor->data.u8, tensor->info.type, bufptr, CCV_TENSOR_CPU_MEMORY, size);
+		else
+			tensor->data.u8 = 0;
+	} else {
+		assert(CCV_TENSOR_GET_MEMORY(params.type) == CCV_TENSOR_CPU_MEMORY);
+		if (size > 0)
+			memcpy(tensor->data.u8, bufptr, size);
+		else
+			tensor->data.u8 = 0;
+	}
+#elif defined(HAVE_MPS)
+	if (CCV_TENSOR_GET_MEMORY(params.type) == CCV_TENSOR_GPU_MEMORY)
+	{
+		// Remove this flag so it can be deallocated as usual.
+		tensor->type &= ~CCV_NO_DATA_ALLOC;
+		assert(CCV_TENSOR_GET_DEVICE(params.type) != CCV_COMPUTE_DEVICE_ANY);
+		if (size > 0)
+			mpmemcpy(tensor->data.u8, tensor->dataof, tensor->info.type, bufptr, 0, CCV_TENSOR_CPU_MEMORY, size);
+		else
+			tensor->data.u8 = 0;
+	} else {
+		assert(CCV_TENSOR_GET_MEMORY(params.type) == CCV_TENSOR_CPU_MEMORY);
+		if (size > 0)
+			memcpy(tensor->data.u8, bufptr, size);
+		else
+			tensor->data.u8 = 0;
+	}
+#else
+	assert(CCV_TENSOR_GET_MEMORY(params.type) == CCV_TENSOR_CPU_MEMORY);
+	if (size > 0)
+		memcpy(tensor->data.u8, bufptr, size);
+	else
 		tensor->data.u8 = 0;
 #endif
 	return tensor;
@@ -313,7 +371,7 @@ int ccv_nnc_tensor_pin_memory(ccv_nnc_tensor_t* const tensor)
 
 void ccv_nnc_tensor_free(ccv_nnc_tensor_t* const tensor)
 {
-	if (CCV_TENSOR_GET_MEMORY(tensor->info.type) == CCV_TENSOR_CPU_MEMORY && tensor->type & CCV_MAPPED_MEM)
+	if (CCV_TENSOR_GET_MEMORY(tensor->info.type) == CCV_TENSOR_CPU_MEMORY && (tensor->type & CCV_MAPPED_MEM))
 	{
 		// The size might be different than the ones when we allocated (for example, the tensor might rewrite its size to be smaller).
 		// This might cause issues in the future.

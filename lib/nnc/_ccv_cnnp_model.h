@@ -22,6 +22,7 @@ typedef void(*ccv_cnnp_add_to_array_f)(void* const context, const ccv_nnc_tensor
  */
 typedef struct {
 	void (*deinit)(ccv_cnnp_model_t* const self); /**< It can be nil. */
+	void (*dealloc)(ccv_cnnp_model_t* const self); /**< It can be nil. This is different from deinit because you should only free other models in this method. */
 	void (*build)(ccv_cnnp_model_t* const self, ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, ccv_nnc_tensor_symbol_t* const outputs, const int output_size); /**< Call this graph to build computation. No need to specify input size or output size, as it is defined along in the model already. */
 	void (*init_states)(ccv_cnnp_model_t* const self, ccv_nnc_symbolic_graph_t* const graph, const ccv_cnnp_state_initializer_f initializer, void* const context); /**< This is called to init ccv_nnc_tensor_symbol_t with a exec. */
 	void (*add_to_parameter)(ccv_cnnp_model_t* const self, const ccv_cnnp_add_to_array_f add_to_array, void* const parameters, const int is_trainable); /**< This is called to add ccv_nnc_tensor_symbol_t to as list of parameters. */
@@ -151,6 +152,7 @@ struct ccv_cnnp_model_s {
 	int input_size; // This is the best effort number, mostly just for subclass to use.
 	int output_size;
 	int max_stream_count;
+	int deinit_state; // If it is 1, it is already deinit.
 	ccv_array_t* io; // The opaque io that can be nil.
 	ccv_array_t* parameter_indices; // The indexes for parameters in the final model.
 	ccv_nnc_symbolic_graph_t* graph;
@@ -167,6 +169,7 @@ struct ccv_cnnp_model_s {
 	int gradient_checkpointing; // Whether to enable gradient checkpointing for training phase.
 	int is_trainable; // Whether this model can be trained or not.
 	int memory_reduction; // Whether to enable memory reduction techniques for training phase.
+	int exec_flags; // The flags to be applied to the execution nodes.
 	size_t workspace_size; // Set the default workspace size.
 	struct {
 		ccv_cnnp_model_io_reader_f reader;
@@ -258,7 +261,17 @@ static inline void ccv_cnnp_model_add_to_output(ccv_cnnp_model_t* const self, co
 		self->isa->add_to_output(self, add_to_array, outputs);
 }
 
+static inline void ccv_cnnp_model_deinit(ccv_cnnp_model_t* const self)
+{
+	if (self->deinit_state)
+		return;
+	if (self->isa->deinit)
+		self->isa->deinit(self);
+	self->deinit_state = 1;
+}
+
 typedef struct {
+	int exec_flags;
 	int is_trainable;
 	int is_gradient_checkpointing;
 	ccv_cnnp_model_sequence_t* model_sequence;
@@ -321,7 +334,10 @@ static inline void ccv_cnnp_model_build(ccv_cnnp_model_t* const self, ccv_nnc_sy
 {
 	assert(self->data);
 	ccv_cnnp_model_build_data_t* const build_data = (ccv_cnnp_model_build_data_t*)self->data;
+	const int old_exec_flags = build_data->exec_flags;
 	const int old_is_trainable = build_data->is_trainable;
+	if (self->exec_flags)
+		build_data->exec_flags |= self->exec_flags;
 	if (self->is_trainable >= 0)
 		build_data->is_trainable = self->is_trainable;
 	if (self->name && self->name[0] != '\0')
@@ -413,6 +429,7 @@ static inline void ccv_cnnp_model_build(ccv_cnnp_model_t* const self, ccv_nnc_sy
 		ccv_cnnp_model_pop(self, build_data->model_sequence);
 	} else if (self->name && self->name[0] != '\0')
 		ccv_cnnp_model_pop(self, build_data->model_sequence);
+	build_data->exec_flags = old_exec_flags;
 	build_data->is_trainable = old_is_trainable;
 }
 
@@ -445,8 +462,9 @@ static inline void ccv_cnnp_model_add_to_parameter_indices(ccv_cnnp_model_t* con
 }
 
 typedef struct {
-	ccv_cnnp_model_sequence_t* sequence;
+	uint8_t add_parameter_indices;
 	char prefix;
+	ccv_cnnp_model_sequence_t* sequence;
 	ccv_array_t* symbols;
 	ccv_array_t* ids;
 	ccv_array_t* trainables;

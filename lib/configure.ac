@@ -159,7 +159,7 @@ AC_ARG_WITH(cuda, [AS_HELP_STRING([--with-cuda], [CUDA installation [ARG=/usr/lo
 if [[ -d "$cuda_prefix" ]]; then
 	AC_SUBST(DEFINE_MACROS, ["$DEFINE_MACROS-D HAVE_CUDA "])
 	# CUB requires stdc++, unfortunately.
-	AC_SUBST(MKLDFLAGS, ["$MKLDFLAGS-lcudart -lcublas -lcurand -lstdc++ "])
+	AC_SUBST(MKLDFLAGS, ["$MKLDFLAGS-lcudart -lcublas -lcurand -lcufile -lstdc++ "])
 	AC_SUBST(CPPFLAGS, ["$CPPFLAGS-I$cuda_prefix/include "])
 	if [[ -d "$cuda_prefix/lib64" ]]; then
 		AC_SUBST(MKLDFLAGS, ["$MKLDFLAGS-L$cuda_prefix/lib64 "])

@@ -96,7 +96,7 @@ static void _ccv_nnc_lssc_tensor_auto_forw(const ccv_nnc_cmd_param_t cmd, const 
 	{
 		assert(inputs[i].datatype == CCV_16F);
 		const int nd = ccv_nnc_tensor_nd(inputs[i].dim);
-		const int hw = ccv_nnc_tensor_hw(inputs[i], nd);
+		const int hw = ccv_nnc_tensor_hw(inputs[i], nd, CCV_NNC_MAX_DIM);
 		outputs[i] = inputs[i];
 		for (j = 0; j < CCV_NNC_MAX_DIM - 1; j++)
 			outputs[i].dim[j + hw] = (inputs[i].dim[j + hw] + 3) / 4;
@@ -112,7 +112,7 @@ static void _ccv_nnc_lssc_tensor_auto_back(const ccv_nnc_cmd_param_t cmd, const 
 	{
 		assert(inputs[i].datatype == CCV_16F);
 		const int nd = ccv_nnc_tensor_nd(inputs[i].dim);
-		const int hw = ccv_nnc_tensor_hw(inputs[i], nd);
+		const int hw = ccv_nnc_tensor_hw(inputs[i], nd, CCV_NNC_MAX_DIM);
 		outputs[i] = inputs[i];
 		for (j = 0; j < CCV_NNC_MAX_DIM - 1; j++)
 			outputs[i].dim[j + hw] = inputs[i].dim[j + hw] * 4;

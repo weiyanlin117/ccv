@@ -53,7 +53,6 @@ MPSGraphDevice* ccv_nnc_default_mps_device(void)
 
 static os_unfair_lock queue_lock; 
 #define OLD_MAX_COMMAND_BUFFER_SIZE (32)
-#define OLD_LIMITED_COMMAND_BUFFER_SIZE (8)
 static id<MTLCommandBuffer> old_last_command_buffers[OLD_MAX_COMMAND_BUFFER_SIZE];
 static id<MTLCommandBuffer> last_command_buffer;
 
@@ -560,7 +559,7 @@ ccv_nnc_stream_context_t* ccv_nnc_init_stream_context(ccv_nnc_stream_context_t* 
 	return stream_context;
 }
 
-static int enable_unbounded_command_buffers = 1;
+static int command_buffers_watermark = 8;
 
 void ccv_nnc_synchronize_stream_context(const ccv_nnc_stream_context_t* const stream_context)
 {
@@ -568,7 +567,7 @@ void ccv_nnc_synchronize_stream_context(const ccv_nnc_stream_context_t* const st
 	id<MTLCommandBuffer> command_buffer = last_command_buffer;
 	last_command_buffer = nil;
 	int i;
-	const int buffer_size = enable_unbounded_command_buffers ? OLD_MAX_COMMAND_BUFFER_SIZE : OLD_LIMITED_COMMAND_BUFFER_SIZE;
+	const int buffer_size = ccv_min(command_buffers_watermark, OLD_MAX_COMMAND_BUFFER_SIZE);
 	id<MTLCommandBuffer> old_buffers[buffer_size];
 	for (i = 0; i < buffer_size; i++)
 	{
@@ -707,9 +706,14 @@ MPSCommandBuffer* ccv_nnc_stream_context_start_mps_command_buffer(ccv_nnc_stream
 	return [MPSCommandBuffer commandBufferFromCommandQueue:_ccv_nnc_default_queue()];
 }
 
-void ccv_nnc_mps_unbounded_command_buffers(int state)
+int ccv_nnc_mps_queue_watermark(void)
 {
-	enable_unbounded_command_buffers = state;
+	return command_buffers_watermark;
+}
+
+void ccv_nnc_mps_set_queue_watermark(int watermark)
+{
+	command_buffers_watermark = ccv_max(ccv_min(watermark, OLD_MAX_COMMAND_BUFFER_SIZE), 0);
 }
 
 void ccv_nnc_stream_context_finish_command_buffer(ccv_nnc_stream_context_t* const stream_context, MPSCommandBuffer* mps_command_buffer, MTLCommandBatch* command_batch)
@@ -722,7 +726,7 @@ void ccv_nnc_stream_context_finish_command_buffer(ccv_nnc_stream_context_t* cons
 	}
 	
 	int i;
-	const int buffer_size = enable_unbounded_command_buffers ? OLD_MAX_COMMAND_BUFFER_SIZE : OLD_LIMITED_COMMAND_BUFFER_SIZE;
+	const int buffer_size = ccv_min(command_buffers_watermark, OLD_MAX_COMMAND_BUFFER_SIZE);
 	if (!stream_context)
 	{
 		id<MTLCommandBuffer> committed_command_buffer = [mtl_command_buffer retain];
@@ -867,6 +871,8 @@ MPSDataType ccv_nnc_mps_datatype(int datatype)
 			return MPSDataTypeInt64;
 		case CCV_16F:
 			return MPSDataTypeFloat16;
+		case CCV_16BF:
+			return MPSDataTypeBFloat16;
 		case CCV_32F:
 			return MPSDataTypeFloat32;
 		case CCV_QX:
@@ -914,7 +920,7 @@ MPSGraphTensor* ccv_nnc_mps_graph_tensor_input(MPSGraph* graph, const ccv_nnc_te
 		{
 			int idx = i;
 			for (j = i + 1; j < nd; j++)
-				if (sorted_stride[idx] < sorted_stride[j])
+				if ((sorted_stride[idx] < sorted_stride[j]) || (sorted_stride[idx] == sorted_stride[j] && sorted_dim[idx] < sorted_dim[j]))
 					idx = j;
 			if (idx == i)
 				continue;
@@ -1045,7 +1051,7 @@ CCV_WARN_UNUSED(MPSGraphShapedType*) ccv_nnc_mps_graph_tensor_input_shape(const 
 		{
 			int idx = i;
 			for (j = i + 1; j < nd; j++)
-				if (sorted_stride[idx] < sorted_stride[j])
+				if ((sorted_stride[idx] < sorted_stride[j]) || (sorted_stride[idx] == sorted_stride[j] && sorted_dim[idx] < sorted_dim[j]))
 					idx = j;
 			if (idx == i)
 				continue;
@@ -1119,7 +1125,7 @@ MPSGraphTensorData* ccv_nnc_mps_graph_tensor_data_with_buffer(const ccv_nnc_tens
 		{
 			int idx = i;
 			for (j = i + 1; j < nd; j++)
-				if (sorted_stride[idx] < sorted_stride[j])
+				if ((sorted_stride[idx] < sorted_stride[j]) || (sorted_stride[idx] == sorted_stride[j] && sorted_dim[idx] < sorted_dim[j]))
 					idx = j;
 			if (idx == i)
 				continue;
@@ -1184,11 +1190,20 @@ static MPSGraphTensorData* ccv_nnc_mps_graph_output_tensor_data(const ccv_nnc_te
 MPSGraphTensorData* ccv_nnc_mps_graph_constant_data(const float val, const int datatype)
 {
 	id<MTLBuffer> buffer;
-	assert(datatype == CCV_16F || datatype == CCV_32F);
+	assert(datatype == CCV_16F || datatype == CCV_32F || datatype == CCV_16BF);
 	if (datatype == CCV_16F)
 	{
 		uint16_t half_bytes;
 		ccv_float_to_half_precision(&val, &half_bytes, 1);
+#ifdef __x86_64__
+		buffer = [ccv_nnc_default_device() newBufferWithLength:sizeof(uint16_t) options:MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeTracked];
+		mpmemcpy(buffer, 0, CCV_TENSOR_GPU_MEMORY, &half_bytes, 0, CCV_TENSOR_CPU_MEMORY, sizeof(uint16_t));
+#else
+		buffer = [ccv_nnc_default_device() newBufferWithBytes:&half_bytes length:sizeof(uint16_t) options:MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModeShared | MTLResourceHazardTrackingModeTracked];
+#endif
+	} else if (datatype == CCV_16BF) {
+		uint16_t half_bytes;
+		ccv_float_to_bfloat(&val, &half_bytes, 1);
 #ifdef __x86_64__
 		buffer = [ccv_nnc_default_device() newBufferWithLength:sizeof(uint16_t) options:MTLResourceCPUCacheModeDefaultCache | MTLResourceStorageModePrivate | MTLResourceHazardTrackingModeTracked];
 		mpmemcpy(buffer, 0, CCV_TENSOR_GPU_MEMORY, &half_bytes, 0, CCV_TENSOR_CPU_MEMORY, sizeof(uint16_t));

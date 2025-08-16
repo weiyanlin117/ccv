@@ -386,6 +386,77 @@ void _ccv_nnc_tensor_set_cpu_ref_f16(ccv_nnc_tensor_view_t* const a, const float
 	}
 }
 
+void _ccv_nnc_tensor_set_cpu_ref_bf16(ccv_nnc_tensor_view_t* const a, const float b)
+{
+	// Assuming this is short.
+	int dim[CCV_NNC_MAX_DIM_ALLOC];
+	int astride[CCV_NNC_MAX_DIM_ALLOC];
+	short h;
+	ccv_float_to_bfloat((float*)&b, (uint16_t*)&h, 1);
+	int x;
+	if (!CCV_IS_TENSOR_VIEW(a))
+	{
+		// Super optimal case, just do one for-loop for sum.
+		const int tensor_count = ccv_nnc_tensor_count(a->info);
+		for (x = 0; x < tensor_count; x++)
+			a->data.f16[x].v = h;
+		return;
+	}
+	assert(CCV_NNC_MAX_DIM == 2); // Need to change this logic for CCV_NNC_MAX_DIM == other number.
+	ccv_nnc_tensor_view_get_dim(a, dim);
+	ccv_nnc_tensor_view_get_stride(a, astride);
+	int i[CCV_NNC_MAX_DIM + 2];
+	short* const ap = (short*)a->data.f16;
+	const int count = dim[2] * dim[3];
+	if (astride[2] == dim[3])
+	{
+		// Special casing if the ainc[3] is the same as dim[3]
+		for (i[0] = 0; i[0] < dim[0]; i[0]++)
+		{
+			short* ap0 = ap + i[0] * astride[0];
+			for (i[1] = 0; i[1] < dim[1]; i[1]++)
+			{
+				for (x = 0; x < count; x++)
+					ap0[x] = h;
+				ap0 += astride[1];
+			}
+		}
+		return;
+	} else if (astride[3] == 1) {
+		// The case the last dimension is packed.
+		for (i[0] = 0; i[0] < dim[0]; i[0]++)
+		{
+			short* const ap0 = ap + i[0] * astride[0];
+			for (i[1] = 0; i[1] < dim[1]; i[1]++)
+			{
+				short* ap1 = ap0 + i[1] * astride[1];
+				for (i[2] = 0; i[2] < dim[2]; i[2]++)
+				{
+					for (x = 0; x < dim[3]; x++)
+						ap1[x] = h;
+					ap1 += astride[2];
+				}
+			}
+		}
+		return;
+	}
+	// Non-optimal case, need to do skip copy.
+	for (i[0] = 0; i[0] < dim[0]; i[0]++)
+	{
+		short* const ap0 = ap + i[0] * astride[0];
+		for (i[1] = 0; i[1] < dim[1]; i[1]++)
+		{
+			short* ap1 = ap0 + i[1] * astride[1];
+			for (i[2] = 0; i[2] < dim[2]; i[2]++)
+			{
+				for (x = 0; x < dim[3]; x++)
+					ap1[x * astride[3]] = h;
+				ap1 += astride[2];
+			}
+		}
+	}
+}
+
 void _ccv_nnc_tensor_set_cpu_ref_f32(ccv_nnc_tensor_view_t* const a, const float b)
 {
 	// Assuming this is float 32.
@@ -603,7 +674,7 @@ static int _ccv_nnc_data_transfer(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t 
 		if (a != b) // Only do transfer if these are two different tensors.
 		{
 			assert(a->info.datatype == b->info.datatype);
-			if (a->info.datatype == CCV_16F)
+			if (a->info.datatype == CCV_16F || a->info.datatype == CCV_16BF)
 				_ccv_nnc_tensor_transfer_cpu_ref_f16(a, b);
 			else if (a->info.datatype == CCV_32F || a->info.datatype == CCV_32S)
 				_ccv_nnc_tensor_transfer_cpu_ref_f32(a, b);
@@ -619,7 +690,7 @@ static int _ccv_nnc_data_transfer(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t 
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_data_transfer;
@@ -628,7 +699,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_CPU_REF)
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATA_TRANSFER_BACKWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_data_transfer;
@@ -644,6 +715,8 @@ static int _ccv_nnc_set_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 		for (i = 0; i < output_size; i++)
 			if (outputs[i]->info.datatype == CCV_16F)
 				_ccv_nnc_tensor_set_cpu_ref_f16((ccv_nnc_tensor_view_t*)outputs[i], cmd.info.blas.a[0]);
+			else if (outputs[i]->info.datatype == CCV_16BF)
+				_ccv_nnc_tensor_set_cpu_ref_bf16((ccv_nnc_tensor_view_t*)outputs[i], cmd.info.blas.a[0]);
 			else if (outputs[i]->info.datatype == CCV_32F)
 				_ccv_nnc_tensor_set_cpu_ref_f32((ccv_nnc_tensor_view_t*)outputs[i], cmd.info.blas.a[0]);
 			else if (outputs[i]->info.datatype == CCV_64F)
@@ -666,7 +739,7 @@ static int _ccv_nnc_set_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 REGISTER_COMMAND_BACKEND(CCV_NNC_SET_FORWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_set_forw;
@@ -675,7 +748,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_SET_FORWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_c
 REGISTER_COMMAND_BACKEND(CCV_NNC_SET_BACKWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_set_back;
@@ -1040,7 +1113,7 @@ static int _ccv_nnc_format_transform(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint
 			} else if (a->info.format == CCV_TENSOR_FORMAT_CHWN && b->info.format == CCV_TENSOR_FORMAT_NCHW) {
 				assert(0);
 			}
-		} else if (a->info.datatype == CCV_16F) {
+		} else if (a->info.datatype == CCV_16F || a->info.datatype == CCV_16BF) {
 			if (a->info.format == b->info.format) {
 				// If it is the same, just do a normal data transfer.
 				_ccv_nnc_tensor_transfer_cpu_ref_f16(a, b);
@@ -1084,7 +1157,7 @@ static int _ccv_nnc_format_transform(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint
 REGISTER_COMMAND_BACKEND(CCV_NNC_FORMAT_TRANSFORM_FORWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_32S | CCV_16F | CCV_8U;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_32S | CCV_16F | CCV_8U | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_format_transform;
@@ -1093,7 +1166,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_FORMAT_TRANSFORM_FORWARD, CCV_NNC_BACKEND_CPU_R
 REGISTER_COMMAND_BACKEND(CCV_NNC_FORMAT_TRANSFORM_BACKWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_32S | CCV_16F | CCV_8U;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_32S | CCV_16F | CCV_8U | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_format_transform;
@@ -1209,7 +1282,7 @@ static int _ccv_nnc_datatype_conversion(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 		assert(a->info.format == b->info.format);
 		if (a->info.datatype == b->info.datatype) {
 			// If it is the same, just do a normal data transfer.
-			if (a->info.datatype == CCV_16F)
+			if (a->info.datatype == CCV_16F || a->info.datatype == CCV_16BF)
 				_ccv_nnc_tensor_transfer_cpu_ref_f16(a, b);
 			else if (a->info.datatype == CCV_32F)
 				_ccv_nnc_tensor_transfer_cpu_ref_f32(a, b);
@@ -1254,6 +1327,42 @@ static int _ccv_nnc_datatype_conversion(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 			const int tensor_count = ccv_nnc_tensor_count(a->info);
 			assert(tensor_count == ccv_nnc_tensor_count(b->info));
 			ccv_half_precision_to_double((uint16_t*)a->data.f16, b->data.f64, tensor_count);
+		} else if (a->info.datatype == CCV_16F && b->info.datatype == CCV_16BF) {
+			assert(CCV_IS_TENSOR_CONTIGUOUS(a));
+			assert(CCV_IS_TENSOR_CONTIGUOUS(b));
+			const size_t tensor_count = ccv_nnc_tensor_count(a->info);
+			assert(tensor_count == ccv_nnc_tensor_count(b->info));
+			ccv_half_precision_to_bfloat((uint16_t*)a->data.f16, (uint16_t*)b->data.f16, tensor_count);
+		} else if (a->info.datatype == CCV_16BF && b->info.datatype == CCV_16F) {
+			assert(CCV_IS_TENSOR_CONTIGUOUS(a));
+			assert(CCV_IS_TENSOR_CONTIGUOUS(b));
+			const int tensor_count = ccv_nnc_tensor_count(a->info);
+			assert(tensor_count == ccv_nnc_tensor_count(b->info));
+			ccv_bfloat_to_half_precision((uint16_t*)a->data.f16, (uint16_t*)b->data.f16, tensor_count);
+		} else if (a->info.datatype == CCV_32F && b->info.datatype == CCV_16BF) {
+			assert(CCV_IS_TENSOR_CONTIGUOUS(a));
+			assert(CCV_IS_TENSOR_CONTIGUOUS(b));
+			const size_t tensor_count = ccv_nnc_tensor_count(a->info);
+			assert(tensor_count == ccv_nnc_tensor_count(b->info));
+			ccv_float_to_bfloat(a->data.f32, (uint16_t*)b->data.f16, tensor_count);
+		} else if (a->info.datatype == CCV_16BF && b->info.datatype == CCV_32F) {
+			assert(CCV_IS_TENSOR_CONTIGUOUS(a));
+			assert(CCV_IS_TENSOR_CONTIGUOUS(b));
+			const int tensor_count = ccv_nnc_tensor_count(a->info);
+			assert(tensor_count == ccv_nnc_tensor_count(b->info));
+			ccv_bfloat_to_float((uint16_t*)a->data.f16, b->data.f32, tensor_count);
+		} else if (a->info.datatype == CCV_64F && b->info.datatype == CCV_16BF) {
+			assert(CCV_IS_TENSOR_CONTIGUOUS(a));
+			assert(CCV_IS_TENSOR_CONTIGUOUS(b));
+			const size_t tensor_count = ccv_nnc_tensor_count(a->info);
+			assert(tensor_count == ccv_nnc_tensor_count(b->info));
+			ccv_double_to_bfloat(a->data.f64, (uint16_t*)b->data.f16, tensor_count);
+		} else if (a->info.datatype == CCV_16BF && b->info.datatype == CCV_64F) {
+			assert(CCV_IS_TENSOR_CONTIGUOUS(a));
+			assert(CCV_IS_TENSOR_CONTIGUOUS(b));
+			const int tensor_count = ccv_nnc_tensor_count(a->info);
+			assert(tensor_count == ccv_nnc_tensor_count(b->info));
+			ccv_bfloat_to_double((uint16_t*)a->data.f16, b->data.f64, tensor_count);
 		}
 	}
 	return CCV_NNC_EXEC_SUCCESS;
@@ -1262,7 +1371,7 @@ static int _ccv_nnc_datatype_conversion(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATATYPE_CONVERSION_FORWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_datatype_conversion;
@@ -1271,7 +1380,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_DATATYPE_CONVERSION_FORWARD, CCV_NNC_BACKEND_CP
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATATYPE_CONVERSION_BACKWARD, CCV_NNC_BACKEND_CPU_REF)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_datatype_conversion;

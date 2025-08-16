@@ -217,5 +217,45 @@ void ccv_nnc_symbolic_graph_symbol_infer(const ccv_nnc_symbolic_graph_t* const s
 int ccv_nnc_over_tensor_symbol_aliases(const ccv_nnc_tensor_symbol_info_t* const tensor_a, const ccv_nnc_tensor_symbol_info_t* const tensor_b);
 int ccv_nnc_tensor_symbol_map_raw(ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t symbol);
 
+typedef struct {
+	int flags;
+	int* chain_ids;
+	int* chain_pos;
+	ccv_sparse_matrix_t* deps;
+} ccv_nnc_exec_dep_t;
+
+ccv_nnc_exec_dep_t ccv_nnc_exec_dep_new(const ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_graph_visit_t* const visit);
+void ccv_nnc_exec_dep_free(const ccv_nnc_exec_dep_t exec_dep);
+
+inline static int ccv_nnc_exec_dep_hop(const ccv_nnc_exec_dep_t exec_dep, const int d, ccv_sparse_matrix_vector_t* const vector, const int dd)
+{
+	// Check if dd is d's ancestor.
+	const int dd_chain_id = exec_dep.chain_ids[dd];
+	const int dd_chain_pos = exec_dep.chain_pos[dd];
+	if (exec_dep.chain_ids[d] == dd_chain_id)
+		return exec_dep.chain_pos[d] - dd_chain_pos;
+	const ccv_numeric_data_t cell = vector ? ccv_get_sparse_matrix_cell_from_vector(exec_dep.deps, vector, dd_chain_id) : ccv_get_sparse_matrix_cell(exec_dep.deps, d, dd_chain_id);
+	// Check if the chain pos is greater than or equal to dd_chain_pos. If it is, it is an ancestor.
+	if (cell.i32 && cell.i32[0] > 0 && cell.i32[0] >= dd_chain_pos)
+		return cell.i32[0] - dd_chain_pos + cell.i32[1];
+	return -1;
+}
+
+inline static int ccv_nnc_exec_dep_check(const ccv_nnc_exec_dep_t exec_dep, const int d, ccv_sparse_matrix_vector_t* const vector, const int dd)
+{
+	// Check if dd is d's ancestor.
+	const int dd_chain_id = exec_dep.chain_ids[dd];
+	const int dd_chain_pos = exec_dep.chain_pos[dd];
+	if (exec_dep.chain_ids[d] == dd_chain_id)
+		return exec_dep.chain_pos[d] > dd_chain_pos;
+	if (vector == (ccv_sparse_matrix_vector_t*)1) // Special sentinel value to say that we don't have vector found.
+		return 0;
+	const ccv_numeric_data_t cell = vector ? ccv_get_sparse_matrix_cell_from_vector(exec_dep.deps, vector, dd_chain_id) : ccv_get_sparse_matrix_cell(exec_dep.deps, d, dd_chain_id);
+	// Check if the chain pos is greater than or equal to dd_chain_pos. If it is, it is an ancestor.
+	if (cell.i32 && cell.i32[0] > 0)
+		return cell.i32[0] >= dd_chain_pos;
+	return 0;
+}
+
 #endif
 

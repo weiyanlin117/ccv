@@ -76,7 +76,7 @@ static int _ccv_nnc_data_transfer(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t 
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY | CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_data_transfer;
@@ -85,7 +85,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_MPS)(ccv
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATA_TRANSFER_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_64F | CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_CPU_MEMORY | CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_data_transfer;
@@ -123,7 +123,7 @@ static int _ccv_nnc_transpose(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 REGISTER_COMMAND_BACKEND(CCV_NNC_TRANSPOSE_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_transpose;
@@ -132,7 +132,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_TRANSPOSE_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc
 REGISTER_COMMAND_BACKEND(CCV_NNC_TRANSPOSE_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_transpose;
@@ -191,7 +191,7 @@ static int _ccv_nnc_set_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 REGISTER_COMMAND_BACKEND(CCV_NNC_SET_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_set_forw;
@@ -200,7 +200,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_SET_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_b
 REGISTER_COMMAND_BACKEND(CCV_NNC_SET_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_set_back;
@@ -256,66 +256,64 @@ static int _ccv_nnc_format_transform(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint
 				ccv_nnc_tensor_view_get_stride(a, astride);
 				ccv_nnc_tensor_view_get_dim(&bt, bdim);
 				ccv_nnc_tensor_view_get_stride(&bt, bstride);
+				const int b_nd = ccv_nnc_tensor_nd(bdim);
+				int j;
 				if (a->info.format == CCV_TENSOR_FORMAT_NHWC)
 				{
 					if (bt.info.format == CCV_TENSOR_FORMAT_NCHW)
 					{
 						int c = bdim[1];
-						bdim[1] = bdim[2];
-						bdim[2] = bdim[3];
-						bdim[3] = c;
+						for (j = 1; j < b_nd - 1; j++)
+							bdim[j] = bdim[j + 1];
+						bdim[b_nd - 1] = c;
 						c = bstride[1];
-						bstride[1] = bstride[2];
-						bstride[2] = bstride[3];
-						bstride[3] = c;
+						for (j = 1; j < b_nd - 1; j++)
+							bstride[j] = bstride[j + 1];
+						bstride[b_nd - 1] = c;
 					} else {
 						assert(bt.info.format == CCV_TENSOR_FORMAT_CHWN);
 						int t;
-						CCV_SWAP(bdim[0], bdim[3], t);
-						CCV_SWAP(bstride[0], bstride[3], t);
+						CCV_SWAP(bdim[0], bdim[b_nd - 1], t);
+						CCV_SWAP(bstride[0], bstride[b_nd - 1], t);
 					}
 				} else if (a->info.format == CCV_TENSOR_FORMAT_NCHW) {
 					if (bt.info.format == CCV_TENSOR_FORMAT_NHWC)
 					{
-						int c = bdim[3];
-						bdim[3] = bdim[2];
-						bdim[2] = bdim[1];
+						int c = bdim[b_nd - 1];
+						for (j = b_nd - 1; j > 1; j--)
+							bdim[j] = bdim[j - 1];
 						bdim[1] = c;
-						c = bstride[3];
-						bstride[3] = bstride[2];
-						bstride[2] = bstride[1];
+						c = bstride[b_nd - 1];
+						for (j = b_nd - 1; j > 1; j--)
+							bstride[j] = bstride[j - 1];
 						bstride[1] = c;
 					} else {
 						assert(bt.info.format == CCV_TENSOR_FORMAT_CHWN);
-						int n = bdim[3];
-						bdim[3] = bdim[2];
-						bdim[2] = bdim[1];
-						bdim[1] = bdim[0];
+						int n = bdim[b_nd - 1];
+						for (j = b_nd - 1; j > 0; j--)
+							bdim[j] = bdim[j - 1];
 						bdim[0] = n;
-						n = bstride[3];
-						bstride[3] = bstride[2];
-						bstride[2] = bstride[1];
-						bstride[1] = bstride[0];
+						n = bstride[b_nd - 1];
+						for (j = b_nd - 1; j > 0; j--)
+							bstride[j] = bstride[j - 1];
 						bstride[0] = n;
 					}
 				} else if (a->info.format == CCV_TENSOR_FORMAT_CHWN) {
 					if (bt.info.format == CCV_TENSOR_FORMAT_NCHW)
 					{
 						int n = bdim[0];
-						bdim[0] = bdim[1];
-						bdim[1] = bdim[2];
-						bdim[2] = bdim[3];
-						bdim[3] = n;
+						for (j = 0; j < b_nd - 1; j++)
+							bdim[j] = bdim[j + 1];
+						bdim[b_nd - 1] = n;
 						n = bstride[0];
-						bstride[0] = bstride[1];
-						bstride[1] = bstride[2];
-						bstride[2] = bstride[3];
-						bstride[3] = n;
+						for (j = 0; j < b_nd - 1; j++)
+							bstride[j] = bstride[j + 1];
+						bstride[b_nd - 1] = n;
 					} else {
 						assert(bt.info.format == CCV_TENSOR_FORMAT_NHWC);
 						int t;
-						CCV_SWAP(bdim[0], bdim[3], t);
-						CCV_SWAP(bstride[0], bstride[3], t);
+						CCV_SWAP(bdim[0], bdim[b_nd - 1], t);
+						CCV_SWAP(bstride[0], bstride[b_nd - 1], t);
 					}
 				}
 				// Mark this as tensor view as we changed its stride and dim.
@@ -342,7 +340,7 @@ static int _ccv_nnc_format_transform(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint
 REGISTER_COMMAND_BACKEND(CCV_NNC_FORMAT_TRANSFORM_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_format_transform;
@@ -351,7 +349,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_FORMAT_TRANSFORM_FORWARD, CCV_NNC_BACKEND_MPS)(
 REGISTER_COMMAND_BACKEND(CCV_NNC_FORMAT_TRANSFORM_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_32S | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_format_transform;
@@ -379,12 +377,12 @@ static int _ccv_nnc_datatype_conversion(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 			assert(CCV_TENSOR_GET_DEVICE_ID(a->info.type) == CCV_TENSOR_GET_DEVICE_ID(b->info.type));
 
 			if (use_mfa) {
-				if (a->info.datatype != CCV_16F && a->info.datatype != CCV_32F) {
+				if (a->info.datatype != CCV_16F && a->info.datatype != CCV_32F && a->info.datatype != CCV_16BF) {
 					use_mfa = false;
 					fallback_reason = "Unsupported data type.";
 					break;
 				}
-				if (b->info.datatype != CCV_16F && b->info.datatype != CCV_32F) {
+				if (b->info.datatype != CCV_16F && b->info.datatype != CCV_32F && b->info.datatype != CCV_16BF) {
 					use_mfa = false;
 					fallback_reason = "Unsupported data type.";
 					break;
@@ -412,6 +410,10 @@ static int _ccv_nnc_datatype_conversion(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 							mtl_original_data_type = 16;
 							break;
 						}
+						case CCV_16BF: {
+							mtl_original_data_type = 121;
+							break;
+						}
 						case CCV_32F: {
 							mtl_original_data_type = 3;
 							break;
@@ -425,6 +427,10 @@ static int _ccv_nnc_datatype_conversion(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 					switch (b->info.datatype) {
 						case CCV_16F: {
 							mtl_data_type = 16;
+							break;
+						}
+						case CCV_16BF: {
+							mtl_data_type = 121;
 							break;
 						}
 						case CCV_32F: {
@@ -488,7 +494,7 @@ static int _ccv_nnc_datatype_conversion(const ccv_nnc_cmd_t cmd, const ccv_nnc_h
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATATYPE_CONVERSION_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_datatype_conversion;
@@ -497,7 +503,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_DATATYPE_CONVERSION_FORWARD, CCV_NNC_BACKEND_MP
 REGISTER_COMMAND_BACKEND(CCV_NNC_DATATYPE_CONVERSION_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_datatype_conversion;

@@ -3,6 +3,7 @@
 #include "ccv_nnc_internal.h"
 #include "ccv_internal.h"
 #include "_ccv_cnnp_model.h"
+#include "_ccv_nnc_graph.h"
 
 // MARK - Level-5 API
 
@@ -132,7 +133,7 @@ void ccv_cnnp_model_add_to_array(void* const context, const ccv_nnc_tensor_symbo
 	ccv_cnnp_model_add_to_array_context_t* const add_to_array_context = (ccv_cnnp_model_add_to_array_context_t*)context;
 	ccv_cnnp_model_t* const model = add_to_array_context->sequence->model;
 	int i;
-	if (!model->parameter_indices)
+	if (add_to_array_context->add_parameter_indices && !model->parameter_indices)
 		model->parameter_indices = ccv_array_new(sizeof(int), 0, 0);
 	for (i = 0; i < add_to_array_context->symbols->rnum; i++)
 	{
@@ -140,14 +141,14 @@ void ccv_cnnp_model_add_to_array(void* const context, const ccv_nnc_tensor_symbo
 		if (other_symbol.d == symbol.d && other_symbol.graph == symbol.graph)
 		{
 			// Only add to parameter_indices if it is trainable.
-			if (add_to_array_context->prefix == 't')
+			if (add_to_array_context->add_parameter_indices)
 				ccv_array_add_unique_int(model->parameter_indices, i);
 			// Found it, return, don't add it.
 			return;
 		}
 	}
 	// Only add to parameter_indices if it is trainable.
-	if (add_to_array_context->prefix == 't')
+	if (add_to_array_context->add_parameter_indices)
 		ccv_array_push(model->parameter_indices, &add_to_array_context->symbols->rnum);
 	// This is a new one, no need to add_unique_int, it is unique.
 	ccv_array_push(add_to_array_context->symbols, &symbol);
@@ -187,6 +188,22 @@ static void _ccv_cnnp_compiled_data_init(ccv_cnnp_compiled_data_t* const compile
 	compiled_data->gradient_checkpoints = gradient_checkpoints;
 }
 
+typedef struct {
+	void* old_graph_exec_symbol_new_hook_context;
+	ccv_nnc_graph_exec_symbol_new_hook_f old_graph_exec_symbol_new_hook;
+	ccv_nnc_symbolic_graph_t* graph;
+	ccv_cnnp_model_build_data_t* build_data;
+} ccv_cnnp_model_set_exec_flags_context_t;
+
+static void _ccv_cnnp_model_set_exec_flags(void* context, const ccv_nnc_graph_exec_symbol_t symbol, const ccv_nnc_cmd_t cmd, const ccv_nnc_tensor_symbol_t* const inputs, const int input_size, const ccv_nnc_tensor_symbol_t* const outputs, const int output_size, const char* const name)
+{
+	ccv_cnnp_model_set_exec_flags_context_t* flags_context = (ccv_cnnp_model_set_exec_flags_context_t*)context;
+	if (flags_context->build_data->exec_flags)
+		ccv_nnc_graph_exec_symbol_set_flags(flags_context->graph, symbol, flags_context->build_data->exec_flags);
+	if (flags_context->old_graph_exec_symbol_new_hook)
+		flags_context->old_graph_exec_symbol_new_hook(flags_context->old_graph_exec_symbol_new_hook_context, symbol, cmd, inputs, input_size, outputs, output_size, name);
+}
+
 static void _ccv_cnnp_model_compile(ccv_cnnp_model_t* const model, const ccv_nnc_tensor_param_t* const inputs, const int input_size, const ccv_nnc_cmd_t loss)
 {
 	assert(model->graph);
@@ -201,8 +218,9 @@ static void _ccv_cnnp_model_compile(ccv_cnnp_model_t* const model, const ccv_nnc
 		.bank = kh_init(ccv_cnnp_model_name_bank)
 	};
 	ccv_cnnp_model_add_to_array_context_t add_to_parameter_context = {
-		.sequence = &model_sequence,
+		.add_parameter_indices = 1,
 		.prefix = 't',
+		.sequence = &model_sequence,
 		.symbols = parameters,
 		.ids = parameter_ids,
 		.trainables = parameter_trainables,
@@ -210,13 +228,15 @@ static void _ccv_cnnp_model_compile(ccv_cnnp_model_t* const model, const ccv_nnc
 	ccv_array_t* const internals = ccv_array_new(sizeof(ccv_nnc_tensor_symbol_t), 0, 0);
 	ccv_array_t* const internal_ids = ccv_array_new(sizeof(char*), 0, 0);
 	ccv_cnnp_model_add_to_array_context_t add_to_output_context = {
-		.sequence = &model_sequence,
+		.add_parameter_indices = 0,
 		.prefix = 'r',
+		.sequence = &model_sequence,
 		.symbols = internals,
 		.ids = internal_ids,
 		.trainables = 0,
 	};
 	ccv_cnnp_model_build_data_t build_data = {
+		.exec_flags = 0,
 		.is_trainable = model->is_trainable >= 0 ? model->is_trainable : 1,
 		.model_sequence = &model_sequence,
 		.add_to_array = ccv_cnnp_model_add_to_array,
@@ -228,7 +248,16 @@ static void _ccv_cnnp_model_compile(ccv_cnnp_model_t* const model, const ccv_nnc
 		.gradient_checkpoints = 0,
 	};
 	model->data = &build_data;
+	ccv_cnnp_model_set_exec_flags_context_t flags_context = {
+		.graph = model->graph,
+		.build_data = &build_data,
+		.old_graph_exec_symbol_new_hook = 0,
+		.old_graph_exec_symbol_new_hook_context = 0
+	};
+	flags_context.old_graph_exec_symbol_new_hook_context = ccv_nnc_graph_exec_symbol_new_hook(model->graph, _ccv_cnnp_model_set_exec_flags, &flags_context, &flags_context.old_graph_exec_symbol_new_hook);
 	ccv_cnnp_model_build(model, model->graph, model->inputs, input_size, 0, 0);
+	// Reset back to previous hook.
+	ccv_nnc_graph_exec_symbol_new_hook(model->graph, flags_context.old_graph_exec_symbol_new_hook, flags_context.old_graph_exec_symbol_new_hook_context, 0);
 	for (i = 0; i < model->output_size; i++)
 	{
 		const ccv_nnc_tensor_symbol_t output = model->outputs[i];
@@ -1800,6 +1829,46 @@ static void _ccv_cnnp_model_multistage_jit_0(ccv_cnnp_model_t* const model, cons
 			.d = *(int*)ccv_array_get(backward_from, i),
 			.graph = compiled_data->graph,
 		};
+	// If there are any set node (to set some tensors to 0) inserted through backward pass, these won't be executed if we just do sources -> evaluate.to_ops, backward.from_ops -> destinations. We need this logic to find out these nodes and explicitly adding them to backward.from_ops.
+	ccv_nnc_graph_exec_info_t* const exec_info = (ccv_nnc_graph_exec_info_t*)ccv_array_get(compiled_data->graph->exec_info, 0);
+	const int exec_info_size = compiled_data->graph->exec_info->rnum;
+	uint32_t* const visited = cccalloc((exec_info_size + 31) >> 5, sizeof(uint32_t));
+	const ccv_nnc_graph_exec_t* const sources = (ccv_nnc_graph_exec_t*)ccv_array_get(compiled_data->graph->sources, 0);
+	const int source_size = compiled_data->graph->sources->rnum;
+	ccv_nnc_graph_visit_t* visit = ccv_nnc_graph_visit_new(compiled_data->graph, exec_info, exec_info_size, sources, source_size, compiled_data->evaluate.to_ops, compiled_data->evaluate.to_op_size, 0);
+	ccv_nnc_graph_visit_for(visit, exec_info, node, idx) {
+		visited[(idx >> 5)] |= (1u << (idx & 31));
+	} ccv_nnc_graph_visit_endfor
+	ccv_nnc_graph_visit_free(visit);
+	const ccv_nnc_graph_exec_t* const destinations = (ccv_nnc_graph_exec_t*)ccv_array_get(compiled_data->graph->destinations, 0);
+	const int destination_size = compiled_data->graph->destinations->rnum;
+	visit = ccv_nnc_graph_visit_new(compiled_data->graph, exec_info, exec_info_size, compiled_data->backward.from_ops, compiled_data->backward.from_op_size, destinations, destination_size, 0);
+	ccv_nnc_graph_visit_for(visit, exec_info, node, idx) {
+		visited[(idx >> 5)] |= (1u << (idx & 31));
+	} ccv_nnc_graph_visit_endfor
+	ccv_nnc_graph_visit_free(visit);
+	visit = ccv_nnc_graph_visit_new(compiled_data->graph, exec_info, exec_info_size, sources, source_size, destinations, destination_size, 0);
+	// Find any missing nodes to be added as source. Right now, these are only set nodes.
+	ccv_nnc_graph_visit_for(visit, exec_info, node, idx) {
+		if (!(visited[(idx >> 5)] & (1u << (idx & 31))))
+		{
+			assert(exec_info[idx].cmd.cmd == CCV_NNC_SET_FORWARD);
+			if (exec_info[idx].cmd.info.blas.a[0] == 0) // Special-casing for empty out the tensor set function, not for the set grad to 1 one.
+				ccv_array_add_unique_int(backward_from, idx);
+		}
+	} ccv_nnc_graph_visit_endfor
+	ccv_nnc_graph_visit_free(visit);
+	ccfree(visited);
+	if (backward_from->rnum != compiled_data->backward.from_op_size) // If it doesn't match, need to redo this.
+	{
+		compiled_data->backward.from_op_size = backward_from->rnum;
+		compiled_data->backward.from_ops = (ccv_nnc_graph_exec_t*)ccrealloc(compiled_data->backward.from_ops, sizeof(ccv_nnc_graph_exec_t) * backward_from->rnum);
+		for (i = 0; i < backward_from->rnum; i++)
+			compiled_data->backward.from_ops[i] = (ccv_nnc_graph_exec_t){
+				.d = *(int*)ccv_array_get(backward_from, i),
+				.graph = compiled_data->graph,
+			};
+	}
 	ccv_array_free(backward_from);
 	ccv_nnc_graph_set_default_static_schedule(compiled_data->graph, compiled_data->stream_type, model->max_stream_count);
 	ccv_nnc_graph_autotune(compiled_data->graph, model->workspace_size, 0, TRAVERSE_FULL);
@@ -2234,6 +2303,201 @@ int ccv_cnnp_model_parameter_count(ccv_cnnp_model_t* const model)
 	return compiled_data->parameters->rnum;
 }
 
+uint64_t ccv_cnnp_model_parameters_size(ccv_cnnp_model_t* const model)
+{
+	assert(model->compiled_data);
+	ccv_cnnp_compiled_data_t* const compiled_data = model->compiled_data;
+	const int parameter_size = compiled_data->parameters->rnum;
+	int i;
+	const ccv_nnc_symbolic_graph_t* const graph = model->graph;
+	uint64_t size = 0;
+	const int tensors_init = !!compiled_data->tensors_init.v;
+	uint32_t* const init_v = tensors_init ? CCV_NNC_INIT_V(compiled_data->tensors_init.v) : 0;
+	for (i = 0; i < parameter_size; i++)
+	{
+		const int d = ((ccv_nnc_tensor_symbol_t*)ccv_array_get(compiled_data->parameters, i))->d;
+		if (tensors_init && compiled_data->tensors.parameters && (init_v[d >> 5] | (1u << (d & 0x1f))) && compiled_data->tensors.parameters[i])
+		{
+			ccv_nnc_tensor_param_t params = compiled_data->tensors.parameters[i]->info;
+			size += ccv_nnc_tensor_data_size(params);
+			continue;
+		}
+		ccv_nnc_tensor_param_t params = ccv_nnc_tensor_symbol_params(graph, (ccv_nnc_tensor_symbol_t){
+			.graph = graph,
+			.d = d
+		});
+		size += ccv_nnc_tensor_data_size(params);
+	}
+	return size;
+}
+
+int ccv_cnnp_model_parameters_move(ccv_cnnp_model_t* const model, char** const names, ccv_nnc_tensor_t** const tensors, const int count, int type)
+{
+	assert(model->compiled_data);
+	ccv_cnnp_compiled_data_t* const compiled_data = model->compiled_data;
+	if (count != compiled_data->parameters->rnum)
+		return 0;
+	if (CCV_TENSOR_GET_DEVICE(type) == CCV_COMPUTE_DEVICE_ANY)
+		CCV_TENSOR_SET_DEVICE_ID(type, 0);
+	int i;
+	// We don't need to consider parallel_count, every parameter on each device is identical.
+	for (i = 0; i < count; i++)
+	{
+		ccv_nnc_tensor_t* tensor = compiled_data->tensors.parameters[i];
+		if ((uintptr_t)tensor & (uintptr_t)1) // If it is not owned. We don't do anything.
+		{
+			tensors[i] = 0;
+			continue;
+		}
+		tensor = CCV_NNC_TENSOR(tensor);
+		if (tensor->info.type == type)
+			tensors[i] = tensor;
+		else {
+			ccv_nnc_tensor_param_t info = tensor->info;
+			info.type = type;
+			tensors[i] = ccv_nnc_tensor_new(0, info, 0); // Create this tensor, don't initiate copy yet.
+		}
+	}
+	for (i = 0; i < count; i++)
+	{
+		ccv_nnc_tensor_t* tensor = compiled_data->tensors.parameters[i];
+		if ((uintptr_t)tensor & (uintptr_t)1) // If it is not owned. We don't do anything.
+			continue;
+		tensor = CCV_NNC_TENSOR(tensor);
+		// Now initiate transfer. We should do this one on a stream.
+		if (tensor->info.type != type)
+			ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(tensor), TENSOR_LIST(tensors[i]), 0);
+	}
+	// Copy names and remove parameters.
+	for (i = 0; i < count; i++)
+	{
+		ccv_nnc_tensor_t* const tensor = compiled_data->tensors.parameters[i];
+		if ((uintptr_t)tensor & (uintptr_t)1) // If it is not owned. We don't do anything.
+		{
+			names[i] = 0;
+			continue;
+		}
+		const char* const name = *(char**)ccv_array_get(compiled_data->ids.parameters, i);
+		const size_t name_len = ccv_min(strnlen(name, 1023), 1023);
+		names[i] = ccmalloc(name_len + 1);
+		names[i][name_len] = 0;
+		memcpy(names[i], name, name_len);
+		if (tensor->info.type == type)
+			compiled_data->tensors.parameters[i] = 0; // Only move when it is moved.
+	}
+	return 1;
+}
+
+KHASH_MAP_INIT_STR(ccv_cnnp_parameter_id, int)
+
+void ccv_cnnp_model_set_parameters_from_key_values(ccv_cnnp_model_t* const model, char* const* const names, ccv_nnc_tensor_t** const tensors, const int count, const int invalidates)
+{
+	assert(model->compiled_data);
+	ccv_cnnp_compiled_data_t* const compiled_data = model->compiled_data;
+	int i;
+	khash_t(ccv_cnnp_parameter_id)* id_map = 0;
+	if (count != compiled_data->parameters->rnum)
+	{
+		id_map = kh_init(ccv_cnnp_parameter_id);
+		// Build the map between name and the index.
+		for (i = 0; i < count; i++)
+		{
+			int ret;
+			const khiter_t k = kh_put(ccv_cnnp_parameter_id, id_map, names[i], &ret);
+			assert(ret != 0);
+			kh_val(id_map, k) = i;
+		}
+	}
+	const int parameter_size = compiled_data->parameters->rnum;
+	int* copy_back = 0;
+	const int tensors_init = !!compiled_data->tensors_init.v;
+	if (!tensors_init)
+		ccv_cnnp_model_tensors_init_0(model, compiled_data);
+	const int parallel_count = ccv_max(model->parallel_count, 1);
+	uint32_t* const init_v = CCV_NNC_INIT_V(compiled_data->tensors_init.v);
+	for (i = 0; i < parameter_size; i++)
+	{
+		int j = i;
+		const char* const name = *(char**)ccv_array_get(compiled_data->ids.parameters, i);
+		if (i >= 0 || strncmp(name, names[i], 1023) != 0)
+		{
+			// Build the map.
+			if (id_map == 0)
+			{
+				id_map = kh_init(ccv_cnnp_parameter_id);
+				for (j = 0; j < count; j++)
+				{
+					int ret;
+					const khiter_t k = kh_put(ccv_cnnp_parameter_id, id_map, names[j], &ret);
+					assert(ret != 0);
+					kh_val(id_map, k) = j;
+				}
+			}
+			const khiter_t k = kh_get(ccv_cnnp_parameter_id, id_map, name);
+			if (k == kh_end(id_map)) // Cannot find the name, skip.
+				continue;
+			j = kh_val(id_map, k);
+		}
+		if (compiled_data->tensors.parameters[i]) // Cannot be a shared parameter to read.
+			{ assert(!((uintptr_t)compiled_data->tensors.parameters[i] & (uintptr_t)1)); }
+		const ccv_nnc_tensor_symbol_t parameter = *(ccv_nnc_tensor_symbol_t*)ccv_array_get(compiled_data->parameters, i);
+		ccv_nnc_tensor_param_t info = ccv_nnc_tensor_symbol_params(parameter.graph, parameter);
+		if (CCV_TENSOR_GET_DEVICE(info.type) == CCV_COMPUTE_DEVICE_ANY)
+			CCV_TENSOR_SET_DEVICE_ID(info.type, 0);
+		const int d = parameter.d;
+		if (info.type == tensors[j]->info.type && invalidates) // Can move.
+		{
+			// Deallocate it if needed.
+			if (!((uintptr_t)compiled_data->tensors.parameters[i] & (uintptr_t)1))
+				if (compiled_data->tensors.parameters[i])
+					ccv_nnc_tensor_free(compiled_data->tensors.parameters[i]);
+			compiled_data->tensors.parameters[i] = tensors[j];
+			tensors[j] = 0;
+		} else {
+			if (!compiled_data->tensors.parameters[i])
+			{ // Not allocated, to allocate first.
+				// Create new one, make sure we create this by having the right parameters.
+				const int type = info.type;
+				info = tensors[j]->info;
+				info.type = type; // Revert back the type.
+				compiled_data->tensors.parameters[i] = ccv_nnc_tensor_new(0, info, 0);
+			}
+			if (!copy_back)
+				copy_back = (int*)cccalloc(parameter_size, sizeof(int));
+			copy_back[i] = j + 1;
+		}
+		init_v[d >> 5] |= (1u << (d & 0x1f));
+		// Create this tensor for other data parallel allocations.
+		info = compiled_data->tensors.parameters[i]->info; // In case we loaded a different info.
+		const int device_id = CCV_TENSOR_GET_DEVICE_ID(info.type);
+		for (j = 1; j < parallel_count; j++)
+			if (!compiled_data->tensors.parameters[i + j * parameter_size])
+			{
+				if (j != device_id)
+					CCV_TENSOR_SET_DEVICE_ID(info.type, j);
+				else
+					CCV_TENSOR_SET_DEVICE_ID(info.type, 0);
+				compiled_data->tensors.parameters[i + j * parameter_size] = ccv_nnc_tensor_new(0, info, 0);
+			}
+			// No need to copy over, this is done in ccv_cnnp_model.c's copy_tensors method.
+	}
+	if (id_map)
+		kh_destroy(ccv_cnnp_parameter_id, id_map);
+	// Now do the transfer.
+	if (copy_back)
+	{
+		for (i = 0; i < parameter_size; i++)
+		{
+			ccv_nnc_tensor_t* const tensor = CCV_NNC_TENSOR(compiled_data->tensors.parameters[i]);
+			if (copy_back[i] == 0)
+				continue;
+			const int j = copy_back[i] - 1;
+			ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(tensors[j]), TENSOR_LIST(tensor), 0);
+		}
+		ccfree(copy_back);
+	}
+}
+
 ccv_cnnp_model_io_t ccv_cnnp_model_parameter_first(ccv_cnnp_model_t* const model, ccv_cnnp_model_parameters_filter_f first, void* const context)
 {
 	ccv_cnnp_compiled_data_t* const compiled_data = model->compiled_data;
@@ -2395,8 +2659,6 @@ void ccv_cnnp_model_set_parameters(ccv_cnnp_model_t* const model, const ccv_cnnp
 	ccv_array_free(to_parameter_indices);
 	ccv_array_free(from_parameter_indices);
 }
-
-KHASH_MAP_INIT_STR(ccv_cnnp_parameter_id, int)
 
 void ccv_cnnp_model_share_parameters(ccv_cnnp_model_t* const model, const ccv_cnnp_model_io_t parameters, const ccv_cnnp_model_t* const from_model, const ccv_cnnp_model_io_t from_parameters, ccv_cnnp_model_parameters_renamer_f renamer, void* const context)
 {
@@ -2984,8 +3246,9 @@ static void _ccv_cnnp_compiled_data_free(const ccv_cnnp_model_t* const model, cc
 
 void ccv_cnnp_model_free(ccv_cnnp_model_t* const model)
 {
-	if (model->isa->deinit)
-		model->isa->deinit(model);
+	ccv_cnnp_model_deinit(model);
+	if (model->isa->dealloc)
+		model->isa->dealloc(model);
 	if (model->io)
 	{
 		int i;
@@ -3024,4 +3287,14 @@ void ccv_cnnp_model_cancel(ccv_cnnp_model_t* const model)
 		ccv_nnc_graph_cancel(compiled_data->graph);
 	if (compiled_data->apply_gradients.graph)
 		ccv_nnc_graph_cancel(compiled_data->apply_gradients.graph);
+}
+
+void ccv_cnnp_model_set_flags(ccv_cnnp_model_t* const model, const int flags)
+{
+	model->exec_flags = flags;
+}
+
+int ccv_cnnp_model_flags(ccv_cnnp_model_t* const model)
+{
+	return model->exec_flags;
 }

@@ -398,27 +398,30 @@ static ccv_nnc_tensor_alloc_prep_t* _ccv_nnc_tensor_alloc_prep_new_and_free_exec
 						break;
 					}
 				}
-				const int x_min_hop = x_buf[0].hop;
-				for (y = 0; y < y_size; y++)
+				if (x_size > 0)
 				{
-					const int y_hop_p_v = y_buf[y].hop;
-					if (y_hop_p_v + x_min_hop >= min_hop)
-						break;
-					ccv_sparse_matrix_vector_t* const y_vector = ccv_get_sparse_matrix_vector(alloc, y_buf[y].idx);
-					if (y_vector)
+					const int x_min_hop = x_buf[0].hop;
+					for (y = 0; y < y_size; y++)
 					{
-						for (x = 0; x < x_size; x++)
+						const int y_hop_p_v = y_buf[y].hop;
+						if (y_hop_p_v + x_min_hop >= min_hop)
+							break;
+						ccv_sparse_matrix_vector_t* const y_vector = ccv_get_sparse_matrix_vector(alloc, y_buf[y].idx);
+						if (y_vector)
 						{
-							const int q_hop_x_v = x_buf[x].hop;
-							const int hop = y_hop_p_v + q_hop_x_v;
-							if (hop >= min_hop)
-								break;
-							const ccv_numeric_data_t val = ccv_get_sparse_matrix_cell_from_vector(alloc, y_vector, x_buf[x].idx);
-							if (val.u64 && val.u64[0] >= a.size)
+							for (x = 0; x < x_size; x++)
 							{
-								min_y = y_buf[y].idx, min_x = x_buf[x].idx, min_hop = hop,
-									min_val[0] = val.u64[0], min_val[1] = val.u64[1];
-								break;
+								const int q_hop_x_v = x_buf[x].hop;
+								const int hop = y_hop_p_v + q_hop_x_v;
+								if (hop >= min_hop)
+									break;
+								const ccv_numeric_data_t val = ccv_get_sparse_matrix_cell_from_vector(alloc, y_vector, x_buf[x].idx);
+								if (val.u64 && val.u64[0] >= a.size)
+								{
+									min_y = y_buf[y].idx, min_x = x_buf[x].idx, min_hop = hop,
+										min_val[0] = val.u64[0], min_val[1] = val.u64[1];
+									break;
+								}
 							}
 						}
 					}
@@ -1243,7 +1246,7 @@ static ccv_nnc_tensor_arena_t* _ccv_nnc_tensor_arena_new(ccv_nnc_symbolic_graph_
 	tensor_arena->vt_alias_r_refs = 0;
 	tensor_arena->vt_sizes = 0;
 	tensor_arena->sub_arena_size = graph_prep->sub_prep_size;
-	tensor_arena->tensor_metadata = ccv_array_new(16 /* align to 16 bytes */, 0, 0);
+	tensor_arena->tensor_metadata = ccv_array_new(16 /* align to 16 bytes */, (sizeof(ccv_nnc_tensor_t) * tensor_symbol_info_size + 15) / 16, 0);
 	tensor_arena->m_tensor_idx = ccv_array_new(sizeof(int), 0, 0);
 	tensor_arena->allocator.context.free = allocator.context.free;
 	tensor_arena->allocator.isa = allocator.isa;
@@ -4129,7 +4132,7 @@ void ccv_nnc_tensor_bind_symbol(ccv_nnc_tensor_arena_t* const tensor_arena, cons
 				++tensor_arena->vt_alias_r_refs_p[alias_ref]; // Count how many alias there are.
 			}
 		int refp = 0;
-		for (i = 1; i < tensor_arena->vt_tensor_size; i++) // Allocate each with aliases position on vt_alias_r_refs. It points to the end.
+		for (i = 0; i < tensor_arena->vt_tensor_size; i++) // Allocate each with aliases position on vt_alias_r_refs. It points to the end.
 			if (tensor_arena->vt_alias_r_refs_p[i])
 				refp = (tensor_arena->vt_alias_r_refs_p[i] += refp);
 			else
@@ -4266,7 +4269,10 @@ int ccv_nnc_tensor_arena_reinit(ccv_nnc_tensor_arena_t* const tensor_arena, cons
 				const int alias_ref = tensor_arena->vt_alias_refs[i] - 1;
 				ccv_nnc_tensor_data(tensor->info, tensor_arena->vt_tensors[alias_ref]->data.u8, off + tensor_arena->vt_tensors[alias_ref]->dataof, &tensor->data, &tensor->dataof);
 				if (CCV_IS_TENSOR_VIEW(tensor))
+				{
 					((ccv_nnc_tensor_view_t*)tensor)->off = off;
+					memcpy(((ccv_nnc_tensor_view_t*)tensor)->stride, symbol_info->stride, sizeof(((ccv_nnc_tensor_view_t*)tensor)->stride));
+				}
 			}
 		}
 	// Should handle sub_tensor_arena, don't do that at the moment.

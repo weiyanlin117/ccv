@@ -82,6 +82,8 @@ static ccv_cnnp_model_t* _cifar_10_dawn(const int softmax)
 static int train_cifar_10(const int epoch_limit, ccv_array_t* const training_set, const int batch_size, const float mean[3], ccv_array_t* const test_set)
 {
 	ccv_cnnp_model_t* const cifar_10 = _cifar_10_dawn(1);
+	int device_map[4] = {3, 2, 1, 0};
+	ccv_nnc_set_device_permutation(CCV_STREAM_CONTEXT_GPU, device_map, 4);
 	const int device_count = ccv_nnc_device_count(CCV_STREAM_CONTEXT_GPU);
 	if (device_count < 1)
 		return -1;
@@ -226,6 +228,7 @@ static int train_cifar_10(const int epoch_limit, ccv_array_t* const training_set
 	ccv_nnc_stream_context_free(stream_contexts[1]);
 	for (i = 0; i < device_count; i++)
 		ccv_nnc_tensor_free(cpu_outputs[i]);
+	ccv_nnc_set_device_permutation(CCV_STREAM_CONTEXT_GPU, 0, 0);
 	return correct;
 }
 

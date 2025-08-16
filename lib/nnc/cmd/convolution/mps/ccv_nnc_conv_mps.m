@@ -28,18 +28,20 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 	assert(w->info.format == CCV_TENSOR_FORMAT_NCHW);
 	int biasdim[CCV_NNC_MAX_DIM_ALLOC] = {0};
 	int biasstride[CCV_NNC_MAX_DIM_ALLOC] = {0};
+	const int size_nd = ccv_nnc_tensor_nd(cmd.info.size.dim) - 1;
+	assert(size_nd == 2 || size_nd == 3);
 	if (bias)
 	{
 		assert(CCV_GET_DATA_TYPE(bias->info.datatype) != CCV_QX);
 		assert(ccv_nnc_tensor_nd(bias->info.dim) == 1);
 		int i;
-		for (i = 0; i < CCV_NNC_MAX_DIM + 2; i++)
+		for (i = 0; i < size_nd + 2; i++)
 			biasdim[i] = 1;
 		int c;
 		if (b->info.format == CCV_TENSOR_FORMAT_NCHW)
 			c = 1;
 		else if (b->info.format == CCV_TENSOR_FORMAT_NHWC)
-			c = CCV_NNC_MAX_DIM + 1;
+			c = size_nd + 1;
 		else
 			c = 0;
 		biasdim[c] = bias->info.dim[0];
@@ -47,7 +49,7 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 		{
 			for (i = 0; i < c; i++)
 				biasstride[i] = bias->info.dim[0] * bias->stride[0];
-			for (i = c; i < CCV_NNC_MAX_DIM + 2; i++)
+			for (i = c; i < size_nd + 2; i++)
 				biasstride[i] = bias->stride[0];
 		}
 	}
@@ -98,15 +100,15 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 		int w_batch_size;
 		int b_batch_size;
 		if (use_mfa) {
-			a_batch_size = a_nd < 4 ? 1 : adim[a_nd - 4];
+			a_batch_size = a_nd < size_nd + 2 ? 1 : adim[a_nd - size_nd - 2];
 			int i;
-			for (i = 0; i < a_nd - 4; i++)
+			for (i = 0; i < a_nd - size_nd - 2; i++)
 				a_batch_size *= adim[i];
-			w_batch_size = w_nd < 5 ? 1 : w->info.dim[w_nd - 5];
-			for (i = 0; i < w_nd - 5; i++)
+			w_batch_size = w_nd < size_nd + 3 ? 1 : w->info.dim[w_nd - size_nd - 3];
+			for (i = 0; i < w_nd - size_nd - 3; i++)
 				w_batch_size *= w->info.dim[i];
-			b_batch_size = b_nd < 4 ? 1 : b->info.dim[b_nd - 4];
-			for (i = 0; i < b_nd - 4; i++)
+			b_batch_size = b_nd < size_nd + 2 ? 1 : b->info.dim[b_nd - size_nd - 2];
+			for (i = 0; i < b_nd - size_nd - 2; i++)
 				b_batch_size *= b->info.dim[i];
 			assert(a_batch_size == b_batch_size || a_batch_size == 1);
 			assert(w_batch_size == a_batch_size || w_batch_size == 1);
@@ -151,17 +153,15 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 			// Height and width of the filter, not the image.
 			const int W = wdim[w_nd - 1];
 			const int H = wdim[w_nd - 2];
+			const int D = size_nd > 2 ? wdim[w_nd - 3] : 1;
 
-			if ((H != 1) || (W != 1)) {
+			if ((H != 1) || (W != 1) || (D != 1)) {
 				use_mfa = false;
 				fallback_reason = "Kernel size not 1x1.";
-			} else if (hint.stride.dim[1] != 1 || hint.stride.dim[0] != 1) {
+			} else if (hint.stride.dim[1] != 1 || hint.stride.dim[0] != 1 || (size_nd == 3 && hint.stride.dim[2] != 1)) {
 				use_mfa = false;
 				fallback_reason = "Strided filter.";
-			} else if (hint.border.begin[1] != 0 ||
-								 hint.border.end[1] != 0 ||
-								 hint.border.begin[0] != 0 ||
-								 hint.border.end[0] != 0) {
+			} else if (hint.border.begin[1] != 0 || hint.border.end[1] != 0 || hint.border.begin[0] != 0 || hint.border.end[0] != 0 || (size_nd == 3 && (hint.border.begin[2] != 0 || hint.border.end[2] != 0))) {
 				use_mfa = false;
 				fallback_reason = "Padded.";
 			} else if (cmd.info.convolution.groups != 1) {
@@ -225,6 +225,7 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 			int O;
 			int H;
 			int W;
+			int D = 1;
 
 			// Bypass a compilation error from a header.
 			int I_dim;
@@ -234,26 +235,33 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 				I_dim = adim[a_nd - 1];
 				W = adim[a_nd - 2];
 				H = adim[a_nd - 3];
+				if (size_nd == 3)
+					D = adim[a_nd - 4];
 			} else if (a->info.format == CCV_TENSOR_FORMAT_NCHW) {
 				// IxHW -> KxM
 				W = adim[a_nd - 1];
 				H = adim[a_nd - 2];
-				I_dim = adim[a_nd - 3];
+				if (size_nd == 3)
+				{
+					D = adim[a_nd - 3];
+					I_dim = adim[a_nd - 4];
+				} else
+					I_dim = adim[a_nd - 3];
 			} else {
 				// This should never happen.
 				assert(false);
 			}
 
 			// OxI -> NxK
-			assert(I_dim == wdim[w_nd - 3]);
-			O = wdim[w_nd - 4];
+			assert(I_dim == wdim[w_nd - size_nd - 1]);
+			O = wdim[w_nd - size_nd - 2];
 
 			ccv_nnc_mfa_gemm_params_t params;
 			if (a->info.format == CCV_TENSOR_FORMAT_NHWC)
 			{
 				params = (ccv_nnc_mfa_gemm_params_t){
 					.data_type = mtl_data_type,
-					.M = (uint32_t)(H * W),
+					.M = (uint32_t)(H * W * D),
 					.N = (uint32_t)O,
 					.K = (uint32_t)I_dim,
 					.A_trans = 0,
@@ -263,16 +271,16 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 					.register_float = 0,
 
 					.batch_dimension = b_batch_size,
-					.batch_stride_a = a_batch_size > 1 ? H * W * I_dim : 0,
+					.batch_stride_a = a_batch_size > 1 ? H * W * D * I_dim : 0,
 					.batch_stride_b = w_batch_size > 1 ? O * I_dim : 0,
-					.batch_stride_c = b_batch_size > 1 ? H * W * O : 0,
+					.batch_stride_c = b_batch_size > 1 ? H * W * D * O : 0,
 					.batch_stride_d = 0,
 				};
 			} else {
 				params = (ccv_nnc_mfa_gemm_params_t){
 					.data_type = mtl_data_type,
 					.M = (uint32_t)O,
-					.N = (uint32_t)(H * W),
+					.N = (uint32_t)(H * W * D),
 					.K = (uint32_t)I_dim,
 					.A_trans = 0,
 					.B_trans = 0,
@@ -282,8 +290,8 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 
 					.batch_dimension = b_batch_size,
 					.batch_stride_a = w_batch_size > 1 ? O * I_dim : 0,
-					.batch_stride_b = a_batch_size > 1 ? H * W * I_dim : 0,
-					.batch_stride_c = b_batch_size > 1 ? H * W * O : 0,
+					.batch_stride_b = a_batch_size > 1 ? H * W * D * I_dim : 0,
+					.batch_stride_c = b_batch_size > 1 ? H * W * D * O : 0,
 					.batch_stride_d = 0,
 				};
 			}
@@ -387,8 +395,9 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 			int* biasdim_r = biasdim;
 			int* biasstride_r = biasstride;
 			int indices[3];
-			const int dilationX = ccv_max(cmd.info.convolution.dilation[1], 1);
-			const int dilationY = ccv_max(cmd.info.convolution.dilation[0], 1);
+			const int dilationZ = size_nd == 2 ? 1 : ccv_max(cmd.info.convolution.dilation[size_nd - 3], 1);
+			const int dilationY = ccv_max(cmd.info.convolution.dilation[size_nd - 2], 1);
+			const int dilationX = ccv_max(cmd.info.convolution.dilation[size_nd - 1], 1);
 			MPSGraphExecutable* executable = ccv_nnc_mps_graph_executable_cache(key, indices, ^void (MPSGraph* graph, NSMutableArray<MPSGraphTensor*>* inputTensors, NSMutableArray<MPSGraphShapedType*>* inputShapedTypes, NSMutableArray<MPSGraphTensor*>* resultTensors) {
 				MPSGraphTensor* mps_input_a;
 				MPSGraphTensor* mps_a = ccv_nnc_mps_graph_tensor_input(graph, a, adim_r, astride_r, &mps_input_a);
@@ -400,8 +409,29 @@ static int _ccv_nnc_conv_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 				[inputTensors addObject:mps_input_w];
 				MPSGraphShapedType* mps_w_shape = ccv_nnc_mps_graph_tensor_input_shape(w, wdim_r, wstride_r);
 				[inputShapedTypes addObject:mps_w_shape];
-				MPSGraphConvolution2DOpDescriptor* descriptor = [MPSGraphConvolution2DOpDescriptor descriptorWithStrideInX:hint.stride.dim[1] strideInY:hint.stride.dim[0] dilationRateInX:dilationX dilationRateInY:dilationY groups:cmd.info.convolution.groups paddingLeft:hint.border.begin[1] paddingRight:hint.border.end[1] paddingTop:hint.border.begin[0] paddingBottom:hint.border.end[0] paddingStyle:MPSGraphPaddingStyleExplicit dataLayout:ccv_nnc_mps_tensor_data_layout(a->info.format) weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
-				MPSGraphTensor* mps_b = [graph convolution2DWithSourceTensor:mps_a weightsTensor:mps_w descriptor:descriptor name:nil];
+				MPSGraphTensor* mps_b;
+				if (size_nd == 2)
+				{
+					MPSGraphConvolution2DOpDescriptor* descriptor = [MPSGraphConvolution2DOpDescriptor descriptorWithStrideInX:hint.stride.dim[1] strideInY:hint.stride.dim[0] dilationRateInX:dilationX dilationRateInY:dilationY groups:cmd.info.convolution.groups paddingLeft:hint.border.begin[1] paddingRight:hint.border.end[1] paddingTop:hint.border.begin[0] paddingBottom:hint.border.end[0] paddingStyle:MPSGraphPaddingStyleExplicit dataLayout:ccv_nnc_mps_tensor_data_layout(a->info.format) weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+					mps_b = [graph convolution2DWithSourceTensor:mps_a weightsTensor:mps_w descriptor:descriptor name:nil];
+				} else if (size_nd == 3) {
+					MPSGraphTensorNamedDataLayout data_layout;
+					switch (a->info.format)
+					{
+						case CCV_TENSOR_FORMAT_NCHW:
+							data_layout = MPSGraphTensorNamedDataLayoutNCDHW;
+							break;
+						case CCV_TENSOR_FORMAT_NHWC:
+							data_layout = MPSGraphTensorNamedDataLayoutNDHWC;
+							break;
+						case CCV_TENSOR_FORMAT_CHWN:
+							assert(0 && "doesn't support CHWN");
+					}
+					MPSGraphConvolution3DOpDescriptor* descriptor = [MPSGraphConvolution3DOpDescriptor descriptorWithStrideInX:hint.stride.dim[size_nd - 1] strideInY:hint.stride.dim[size_nd - 2] strideInZ:hint.stride.dim[size_nd - 3] dilationRateInX:dilationX dilationRateInY:dilationY dilationRateInZ:dilationZ groups:cmd.info.convolution.groups paddingLeft:hint.border.begin[size_nd - 1] paddingRight:hint.border.end[size_nd - 1] paddingTop:hint.border.begin[size_nd - 2] paddingBottom:hint.border.end[size_nd - 2] paddingFront:hint.border.begin[size_nd - 3] paddingBack:hint.border.end[size_nd - 3] paddingStyle:MPSGraphPaddingStyleExplicit dataLayout:data_layout weightsLayout:MPSGraphTensorNamedDataLayoutOIDHW];
+					mps_b = [graph convolution3DWithSourceTensor:mps_a weightsTensor:mps_w descriptor:descriptor name:nil];
+				} else {
+					assert(0);
+				}
 				if (bias)
 				{
 					MPSGraphTensor* mps_input_bias;
@@ -611,7 +641,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_CONVOLUTION_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_n
 REGISTER_COMMAND_BACKEND(CCV_NNC_CONVOLUTION_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_NHWC;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_conv_back;

@@ -731,7 +731,7 @@ static void _ccv_cnnp_combine_new(void* const* const input_data, const int input
 						memcpy(params.dim + 1, inputs[j]->info.dim, sizeof(int) * nd);
 					} else if (nd >= 3) {
 						memset(params.dim, 0, sizeof(int) * CCV_NNC_MAX_DIM_ALLOC);
-						const int hw = ccv_nnc_tensor_hw(inputs[j]->info, nd);
+						const int hw = ccv_nnc_tensor_hw(inputs[j]->info, nd, CCV_NNC_MAX_DIM);
 						if (batch->format == CCV_TENSOR_FORMAT_NCHW)
 						{
 							params.dim[1] = ccv_nnc_tensor_get_c(inputs[j]->info);

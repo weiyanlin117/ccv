@@ -26,6 +26,10 @@
 #define CMD_CMUL_FORWARD() ccv_nnc_cmd(CCV_NNC_CMUL_FORWARD, 0, (ccv_nnc_cmd_param_t){.size={.dim={1,1,1}}}, 0)
 // CCV_NNC_CMUL_BACKWARD
 #define CMD_CMUL_BACKWARD() ccv_nnc_cmd(CCV_NNC_CMUL_BACKWARD, 0, (ccv_nnc_cmd_param_t){.size={.dim={1,1,1}}}, 0)
+// CCV_NNC_SEGMENTED_GEMM_FORWARD
+#define CMD_SEGMENTED_GEMM_FORWARD(...) ccv_nnc_cmd(CCV_NNC_SEGMENTED_GEMM_FORWARD, 0, CMD_GEMM(__VA_ARGS__), 0)
+// CCV_NNC_SEGMENTED_GEMM_BACKWARD
+#define CMD_SEGMENTED_GEMM_BACKWARD(...) ccv_nnc_cmd(CCV_NNC_SEGMENTED_GEMM_BACKWARD, 0, CMD_GEMM(__VA_ARGS__), 0)
 // CCV_NNC_COMM_ALLREDUCE_FORWARD
 #define CMD_COMM_ALLREDUCE_FORWARD() ccv_nnc_cmd(CCV_NNC_COMM_ALLREDUCE_FORWARD, 0, ccv_nnc_cmd_auto, 0)
 // CCV_NNC_COMM_ALLREDUCE_BACKWARD
@@ -94,6 +98,10 @@
 #define CMD_EWSQRT_FORWARD() ccv_nnc_cmd(CCV_NNC_EWSQRT_FORWARD, 0, ccv_nnc_cmd_auto, 0)
 // CCV_NNC_EWSQRT_BACKWARD
 #define CMD_EWSQRT_BACKWARD() ccv_nnc_cmd(CCV_NNC_EWSQRT_BACKWARD, 0, ccv_nnc_cmd_auto, 0)
+// CCV_NNC_EWABS_FORWARD
+#define CMD_EWABS_FORWARD() ccv_nnc_cmd(CCV_NNC_EWABS_FORWARD, 0, ccv_nnc_cmd_auto, 0)
+// CCV_NNC_EWABS_BACKWARD
+#define CMD_EWABS_BACKWARD() ccv_nnc_cmd(CCV_NNC_EWABS_BACKWARD, 0, ccv_nnc_cmd_auto, 0)
 // CCV_NNC_CLAMP_FORWARD
 #define CMD_CLAMP_FORWARD(_min, _max) ccv_nnc_cmd(CCV_NNC_CLAMP_FORWARD, 0, (ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.clamp={.min=_min,.max=_max}}, 0)
 // CCV_NNC_CLAMP_BACKWARD
@@ -182,6 +190,10 @@
 #define CMD_PAD_FORWARD(_type, _begin, _end) ccv_nnc_cmd(CCV_NNC_PAD_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={ESCAPE_X _begin}},.pad={.type=_type,.end={ESCAPE_X _end}}}), 0)
 // CCV_NNC_PAD_BACKWARD
 #define CMD_PAD_BACKWARD(_type, _begin, _end) ccv_nnc_cmd(CCV_NNC_PAD_BACKWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={ESCAPE_X _begin}},.pad={.type=_type,.end={ESCAPE_X _end}}}), 0)
+// CCV_NNC_PARTITION_FORWARD
+#define CMD_PARTITION_FORWARD(_kth, _along_axis, _descending) ccv_nnc_cmd(CCV_NNC_PARTITION_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.partition={.kth=_kth,.along_axis=_along_axis,.descending=_descending}}), 0)
+// CCV_NNC_PARTITION_BACKWARD
+#define CMD_PARTITION_BACKWARD(_kth, _along_axis, _descending) ccv_nnc_cmd(CCV_NNC_PARTITION_BACKWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.partition={.kth=_kth,.along_axis=_along_axis,.descending=_descending}}), 0)
 // CCV_NNC_MAX_POOL_FORWARD
 #define CMD_MAX_POOL_FORWARD(rows, cols) ccv_nnc_cmd(CCV_NNC_MAX_POOL_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={rows, cols,1}}}), 0)
 // CCV_NNC_MAX_POOL_BACKWARD
@@ -244,6 +256,10 @@
 #define CMD_SCALED_DOT_PRODUCT_ATTENTION_FORWARD(_scale, _is_causal) ccv_nnc_cmd(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.scaled_dot_product_attention={.scale=_scale,.is_causal=_is_causal}}), 0)
 // CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD
 #define CMD_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD(_scale, _is_causal) ccv_nnc_cmd(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_BACKWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.scaled_dot_product_attention={.scale=_scale,.is_causal=_is_causal}}), 0)
+// CCV_NNC_SCATTER_ADD_FORWARD
+#define CMD_SCATTER_ADD_FORWARD(_bincount) ccv_nnc_cmd(CCV_NNC_SCATTER_ADD_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.scatter_add={.bincount=_bincount}}), 0)
+// CCV_NNC_SCATTER_ADD_BACKWARD
+#define CMD_SCATTER_ADD_BACKWARD(_bincount) ccv_nnc_cmd(CCV_NNC_SCATTER_ADD_BACKWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.scatter_add={.bincount=_bincount}}), 0)
 // CCV_NNC_SGD_FORWARD
 #define CMD_SGD_FORWARD(_nesterov, _rate, _scale, _decay, _momentum, _dampening) ccv_nnc_cmd(CCV_NNC_SGD_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.sgd={.nesterov=_nesterov,.rate=_rate,.scale=_scale,.decay=_decay,.momentum=_momentum,.dampening=_dampening}}), 0)
 // CCV_NNC_SIGMOID_FORWARD
@@ -278,6 +294,10 @@
 #define CMD_SOFTMAX_CROSSENTROPY_BACKWARD_X_2(_trim0, _trim1) ccv_nnc_cmd(CCV_NNC_SOFTMAX_CROSSENTROPY_BACKWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.label_smoothing={.trim0=_trim0,.trim1=_trim1}}), 0)
 #define CMD_SOFTMAX_CROSSENTROPY_BACKWARD_X_SEL(_0, _1, _2, _FX, ...) _FX
 #define CMD_SOFTMAX_CROSSENTROPY_BACKWARD(...) CMD_SOFTMAX_CROSSENTROPY_BACKWARD_X_SEL(CMD_SOFTMAX_CROSSENTROPY_BACKWARD_X_F, ##__VA_ARGS__, CMD_SOFTMAX_CROSSENTROPY_BACKWARD_X_2, CMD_SOFTMAX_CROSSENTROPY_BACKWARD_X_F, CMD_SOFTMAX_CROSSENTROPY_BACKWARD_X_0)(__VA_ARGS__)
+// CCV_NNC_SORT_FORWARD
+#define CMD_SORT_FORWARD(_along_axis, _descending) ccv_nnc_cmd(CCV_NNC_SORT_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.sort={.along_axis=_along_axis,.descending=_descending}}), 0)
+// CCV_NNC_SORT_BACKWARD
+#define CMD_SORT_BACKWARD(_along_axis, _descending) ccv_nnc_cmd(CCV_NNC_SORT_BACKWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.sort={.along_axis=_along_axis,.descending=_descending}}), 0)
 // CCV_NNC_SWISH_FORWARD
 #define CMD_SWISH_FORWARD() ccv_nnc_cmd(CCV_NNC_SWISH_FORWARD, 0, ccv_nnc_cmd_auto, 0)
 // CCV_NNC_SWISH_BACKWARD
@@ -286,6 +306,10 @@
 #define CMD_TANH_FORWARD() ccv_nnc_cmd(CCV_NNC_TANH_FORWARD, 0, ccv_nnc_cmd_auto, 0)
 // CCV_NNC_TANH_BACKWARD
 #define CMD_TANH_BACKWARD() ccv_nnc_cmd(CCV_NNC_TANH_BACKWARD, 0, ccv_nnc_cmd_auto, 0)
+// CCV_NNC_UNIQUE_CONSECUTIVE_FORWARD
+#define CMD_UNIQUE_CONSECUTIVE_FORWARD(_bincount) ccv_nnc_cmd(CCV_NNC_UNIQUE_CONSECUTIVE_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.unique_consecutive={.bincount=_bincount}}), 0)
+// CCV_NNC_UNIQUE_CONSECUTIVE_BACKWARD
+#define CMD_UNIQUE_CONSECUTIVE_BACKWARD(_bincount) ccv_nnc_cmd(CCV_NNC_UNIQUE_CONSECUTIVE_BACKWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.unique_consecutive={.bincount=_bincount}}), 0)
 // CCV_NNC_UPSAMPLE_FORWARD
 #define CMD_UPSAMPLE_FORWARD(_type, _width_scale, _height_scale, _align_corners) ccv_nnc_cmd(CCV_NNC_UPSAMPLE_FORWARD, 0, ((ccv_nnc_cmd_param_t){.size={.dim={1,1,1}},.upsample={.type=_type,.width_scale=_width_scale,.height_scale=_height_scale,.align_corners=_align_corners}}), 0)
 // CCV_NNC_UPSAMPLE_BACKWARD

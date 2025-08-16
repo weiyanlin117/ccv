@@ -1,5 +1,6 @@
 #include "ccv_nnc.h"
 #include "ccv_nnc_internal.h"
+#include "3rdparty/khash/khash.h"
 #include "ccv_nnc_easy.h"
 #ifdef HAVE_CUDA
 #include "gpu/ccv_nnc_compat.h"
@@ -155,19 +156,21 @@ int ccv_nnc_hint_verify(const ccv_nnc_hint_t hint, const ccv_nnc_cmd_param_t cmd
 	int i;
 	assert(a.format == b.format);
 	const int nd = ccv_nnc_tensor_nd(a.dim);
-	assert(nd == CCV_NNC_MAX_DIM + 1 || nd == CCV_NNC_MAX_DIM + 2);
+	const int size_nd = ccv_max(2, ccv_nnc_tensor_nd(cmd.size.dim) - 1);
+	assert(size_nd == 2 || size_nd == 3); // Support 3D convolution.
+	assert(nd == size_nd + 1 || nd == size_nd + 2);
 	int hw;
 	if ((a.format == CCV_TENSOR_FORMAT_CHWN) ||
-		(a.format == CCV_TENSOR_FORMAT_NHWC && nd == CCV_NNC_MAX_DIM + 1))
+		(a.format == CCV_TENSOR_FORMAT_NHWC && nd == size_nd + 1))
 		hw = 0;
-	else if ((a.format == CCV_TENSOR_FORMAT_NHWC && nd == CCV_NNC_MAX_DIM + 2) ||
-			 (a.format == CCV_TENSOR_FORMAT_NCHW && nd == CCV_NNC_MAX_DIM + 1))
+	else if ((a.format == CCV_TENSOR_FORMAT_NHWC && nd == size_nd + 2) ||
+			 (a.format == CCV_TENSOR_FORMAT_NCHW && nd == size_nd + 1))
 		hw = 1;
-	else if (a.format == CCV_TENSOR_FORMAT_NCHW && nd == CCV_NNC_MAX_DIM + 2)
+	else if (a.format == CCV_TENSOR_FORMAT_NCHW && nd == size_nd + 2)
 		hw = 2;
 	else
 		assert(0 && "unknown format");
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < size_nd; i++)
 	{
 		if ((hint.border.begin[i] + hint.border.end[i] + a.dim[i + hw] - cmd.size.dim[i]) % hint.stride.dim[i] != 0)
 			return -1;
@@ -186,23 +189,25 @@ ccv_nnc_hint_t ccv_nnc_hint_auto(const ccv_nnc_cmd_param_t cmd, const ccv_nnc_te
 	assert(a.format == b.format);
 	const int a_nd = ccv_nnc_tensor_nd(a.dim);
 	const int b_nd = ccv_nnc_tensor_nd(b.dim);
+	const int size_nd = ccv_max(2, ccv_nnc_tensor_nd(cmd.size.dim) - 1);
+	assert(size_nd == 2 || size_nd == 3); // Support 3D convolution.
 	// Is not auto hint deducible dimensions.
-	if (a_nd != b_nd || (a_nd != CCV_NNC_MAX_DIM + 1 && a_nd != CCV_NNC_MAX_DIM + 2))
+	if (a_nd != b_nd || (a_nd != size_nd + 1 && a_nd != size_nd + 2))
 		return ccv_nnc_no_hint;
 	int hw;
 	if ((a.format == CCV_TENSOR_FORMAT_CHWN) ||
-		(a.format == CCV_TENSOR_FORMAT_NHWC && a_nd == CCV_NNC_MAX_DIM + 1))
+		(a.format == CCV_TENSOR_FORMAT_NHWC && a_nd == size_nd + 1))
 		hw = 0;
-	else if ((a.format == CCV_TENSOR_FORMAT_NHWC && a_nd == CCV_NNC_MAX_DIM + 2) ||
-			 (a.format == CCV_TENSOR_FORMAT_NCHW && a_nd == CCV_NNC_MAX_DIM + 1))
+	else if ((a.format == CCV_TENSOR_FORMAT_NHWC && a_nd == size_nd + 2) ||
+			 (a.format == CCV_TENSOR_FORMAT_NCHW && a_nd == size_nd + 1))
 		hw = 1;
-	else if (a.format == CCV_TENSOR_FORMAT_NCHW && a_nd == CCV_NNC_MAX_DIM + 2)
+	else if (a.format == CCV_TENSOR_FORMAT_NCHW && a_nd == size_nd + 2)
 		hw = 2;
 	else
 		assert(0 && "unknown format");
 	ccv_nnc_hint_t hint_auto = {};
 	// 0-dim is reserved for channels
-	for (i = 0; i < CCV_NNC_MAX_DIM; i++)
+	for (i = 0; i < size_nd; i++)
 	{
 		// Cannot have one of the dim is zero, we cannot auto the hint, return no hint.
 		assert(a.dim[i + hw] && b.dim[i + hw]);
@@ -341,6 +346,203 @@ static void _ccv_nnc_cmd_set_device_id(ccv_nnc_tensor_t* const* const inputs, co
 #endif
 }
 
+typedef struct {
+	int format;
+	int datatype;
+	int nd;
+	off_t dataof;
+	int dim[CCV_NNC_MAX_DIM_ALLOC];
+	int stride[CCV_NNC_MAX_DIM_ALLOC];
+} ccv_nnc_cmd_autotune_tensor_shape_t;
+
+typedef struct {
+	uint32_t cmd;
+	ccv_nnc_cmd_param_t params;
+	ccv_nnc_hint_t hint;
+	int flags;
+	int input_size;
+	int output_size;
+	size_t workspace_size;
+	ccv_nnc_cmd_autotune_tensor_shape_t* inputs;
+	ccv_nnc_cmd_autotune_tensor_shape_t* outputs;
+} ccv_nnc_cmd_autotune_key_t;
+
+static CCV_WARN_UNUSED(ccv_nnc_cmd_autotune_key_t) ccv_nnc_cmd_autotune_key_new(const ccv_nnc_cmd_t cmd, const size_t workspace_size, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size)
+{
+	ccv_nnc_cmd_autotune_key_t key = {
+		.cmd = cmd.cmd,
+		.params = cmd.info,
+		.hint = hint,
+		.workspace_size = workspace_size,
+		.inputs = 0,
+		.input_size = 0,
+		.outputs = 0,
+		.output_size = 0
+	};
+	if (input_size == 0 && output_size == 0)
+		return key;
+	assert(input_size >= 0 && output_size >= 0);
+	key.input_size = input_size;
+	key.output_size = output_size;
+	key.inputs = (ccv_nnc_cmd_autotune_tensor_shape_t*)ccmalloc(sizeof(ccv_nnc_cmd_autotune_tensor_shape_t) * (input_size + output_size));
+	key.outputs = key.inputs + input_size;
+	int i, j;
+	for (i = 0; i < input_size; i++)
+	{
+		memset(key.inputs[i].dim, 0, sizeof(key.inputs[i].dim));
+		memset(key.inputs[i].stride, 0, sizeof(key.inputs[i].stride));
+		if (!inputs[i])
+		{
+			key.inputs[i].format = 0;
+			key.inputs[i].datatype = 0;
+			key.inputs[i].dataof = 0;
+			key.inputs[i].nd = 0;
+			continue;
+		}
+		key.inputs[i].format = inputs[i]->info.format;
+		key.inputs[i].datatype = inputs[i]->info.datatype;
+		key.inputs[i].dataof = inputs[i]->dataof;
+		const int nd = key.inputs[i].nd = ccv_nnc_tensor_nd(inputs[i]->info.dim);
+		for (j = 0; j < nd; j++)
+			key.inputs[i].dim[j] = inputs[i]->info.dim[j];
+		if (CCV_IS_TENSOR_VIEW(inputs[i]))
+			for (j = 0; j < nd; j++)
+				key.inputs[i].stride[j] = ((ccv_nnc_tensor_view_t*)inputs[i])->stride[j];
+	}
+	for (i = 0; i < output_size; i++)
+	{
+		memset(key.outputs[i].dim, 0, sizeof(key.outputs[i].dim));
+		memset(key.outputs[i].stride, 0, sizeof(key.outputs[i].stride));
+		if (!outputs[i])
+		{
+			key.outputs[i].format = 0;
+			key.outputs[i].datatype = 0;
+			key.outputs[i].dataof = 0;
+			key.outputs[i].nd = 0;
+			continue;
+		}
+		key.outputs[i].format = outputs[i]->info.format;
+		key.outputs[i].datatype = outputs[i]->info.datatype;
+		key.outputs[i].dataof = outputs[i]->dataof;
+		const int nd = key.outputs[i].nd = ccv_nnc_tensor_nd(outputs[i]->info.dim);
+		for (j = 0; j < nd; j++)
+			key.outputs[i].dim[j] = outputs[i]->info.dim[j];
+		if (CCV_IS_TENSOR_VIEW(outputs[i]))
+			for (j = 0; j < nd; j++)
+				key.outputs[i].stride[j] = ((ccv_nnc_tensor_view_t*)outputs[i])->stride[j];
+	}
+	return key;
+}
+
+// autotune cache.
+static inline uint32_t twang_32from64(uint64_t key)
+{
+	key = (~key) + (key << 18);
+	key = key ^ (key >> 31);
+	key = key * 21;
+	key = key ^ (key >> 11);
+	key = key + (key << 6);
+	key = key ^ (key >> 22);
+	return (uint32_t)(key);
+}
+
+static inline khint32_t _kh_autotune_key_executable_hash_func(const ccv_nnc_cmd_autotune_key_t key)
+{
+	uint32_t h = key.cmd;
+	int i, j;
+	uint32_t* data = (uint32_t*)&key.params;
+	for (i = 0; i < sizeof(key.params) / sizeof(uint32_t); i++)
+		h = twang_32from64(((uint64_t)h << 32) | data[i]);
+	data = (uint32_t*)&key.hint;
+	for (i = 0; i < sizeof(key.hint) / sizeof(uint32_t); i++)
+		h = twang_32from64(((uint64_t)h << 32) | data[i]);
+	h = twang_32from64(((uint64_t)h << 32) | key.workspace_size);
+	h = twang_32from64(((uint64_t)h << 32) | key.input_size);
+	h = twang_32from64(((uint64_t)h << 32) | key.output_size);
+	for (i = 0; i < key.input_size; i++)
+	{
+		h = twang_32from64(((uint64_t)h << 32) | key.inputs[i].format);
+		h = twang_32from64(((uint64_t)h << 32) | key.inputs[i].datatype);
+		h = twang_32from64(((uint64_t)h << 32) | key.inputs[i].dataof);
+		h = twang_32from64(((uint64_t)h << 32) | key.inputs[i].nd);
+		for (j = 0; j < key.inputs[i].nd; j++)
+		{
+			h = twang_32from64(((uint64_t)h << 32) | key.inputs[i].dim[j]);
+			h = twang_32from64(((uint64_t)h << 32) | key.inputs[i].stride[j]);
+		}
+	}
+	for (i = 0; i < key.output_size; i++)
+	{
+		h = twang_32from64(((uint64_t)h << 32) | key.outputs[i].format);
+		h = twang_32from64(((uint64_t)h << 32) | key.outputs[i].datatype);
+		h = twang_32from64(((uint64_t)h << 32) | key.outputs[i].dataof);
+		h = twang_32from64(((uint64_t)h << 32) | key.outputs[i].nd);
+		for (j = 0; j < key.outputs[i].nd; j++)
+		{
+			h = twang_32from64(((uint64_t)h << 32) | key.outputs[i].dim[j]);
+			h = twang_32from64(((uint64_t)h << 32) | key.outputs[i].stride[j]);
+		}
+	}
+	return (khint32_t)h;
+}
+
+static inline int _kh_autotune_key_executable_hash_equal(const ccv_nnc_cmd_autotune_key_t a, const ccv_nnc_cmd_autotune_key_t b)
+{
+	if (a.cmd != b.cmd || a.flags != b.flags || a.workspace_size != b.workspace_size || a.input_size != b.input_size || a.output_size != b.output_size)
+		return 0;
+	if (memcmp(&a.params, &b.params, sizeof(a.params)) != 0)
+		return 0;
+	if (memcmp(&a.hint, &b.hint, sizeof(a.hint)) != 0)
+		return 0;
+	int i, j;
+	for (i = 0; i < a.input_size; i++)
+	{
+		if (a.inputs[i].format != b.inputs[i].format || a.inputs[i].datatype != b.inputs[i].datatype || a.inputs[i].nd != b.inputs[i].nd || a.inputs[i].dataof != b.inputs[i].dataof)
+			return 0;
+		for (j = 0; j < a.inputs[i].nd; j++)
+			if (a.inputs[i].dim[j] != b.inputs[i].dim[j] || a.inputs[i].stride[j] != b.inputs[i].stride[j])
+				return 0;
+	}
+	for (i = 0; i < a.output_size; i++)
+	{
+		if (a.outputs[i].format != b.outputs[i].format || a.outputs[i].datatype != b.outputs[i].datatype || a.outputs[i].nd != b.outputs[i].nd || a.outputs[i].dataof != b.outputs[i].dataof)
+			return 0;
+		for (j = 0; j < a.outputs[i].nd; j++)
+			if (a.outputs[i].dim[j] != b.outputs[i].dim[j] || a.outputs[i].stride[j] != b.outputs[i].stride[j])
+				return 0;
+	}
+	return 1;
+}
+
+typedef struct {
+	int backend;
+	int algorithm;
+} ccv_nnc_cmd_autotune_val_t;
+
+KHASH_INIT(autotune_executable_cache, ccv_nnc_cmd_autotune_key_t, ccv_nnc_cmd_autotune_val_t, 1, _kh_autotune_key_executable_hash_func, _kh_autotune_key_executable_hash_equal)
+
+static khash_t(autotune_executable_cache)* g_autotune_executable_cache = 0;
+
+static inline void ccv_nnc_cmd_autotune_key_free(ccv_nnc_cmd_autotune_key_t key)
+{
+	if (key.inputs)
+		ccfree(key.inputs);
+}
+
+void ccv_nnc_drain_autotune_cache(void)
+{
+	if (!g_autotune_executable_cache)
+		return;
+	khiter_t k;
+	for (k = kh_begin(g_autotune_executable_cache); k < kh_end(g_autotune_executable_cache); k++)
+	{
+		if (!kh_exist(g_autotune_executable_cache, k))
+			continue;
+		ccv_nnc_cmd_autotune_key_free(kh_key(g_autotune_executable_cache, k));
+		kh_del(autotune_executable_cache, g_autotune_executable_cache, k);
+	}
+}
+
 ccv_nnc_cmd_t ccv_nnc_cmd_autotune(const ccv_nnc_cmd_t cmd, const size_t max_workspace_size, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
 {
 	// This is a custom cmd kernel, no need to autotune.
@@ -362,6 +564,19 @@ ccv_nnc_cmd_t ccv_nnc_cmd_autotune(const ccv_nnc_cmd_t cmd, const size_t max_wor
 		return cmd;
 	// Otherwise, we are good to go.
 	ccv_nnc_cmd_t tuned_cmd = cmd;
+	if (!g_autotune_executable_cache)
+		g_autotune_executable_cache = kh_init(autotune_executable_cache);
+	int ret = 0;
+	ccv_nnc_cmd_autotune_key_t key = ccv_nnc_cmd_autotune_key_new(cmd, max_workspace_size, hint, flags, inputs, input_size, outputs, output_size);
+	khiter_t kiter = kh_put(autotune_executable_cache, g_autotune_executable_cache, key, &ret);
+	if (ret == 0)
+	{
+		ccv_nnc_cmd_autotune_key_free(key);
+		const ccv_nnc_cmd_autotune_val_t val = kh_val(g_autotune_executable_cache, kiter);
+		tuned_cmd.backend = val.backend;
+		tuned_cmd.algorithm = val.algorithm;
+		return tuned_cmd;
+	}
 	int64_t best_measured = -1;
 	const int cmd_idx = _ccv_nnc_cmd_ph(cmd.cmd);
 	assert(cmd_idx >= 0 && cmd_idx < sizeof(init_map) / sizeof(init_map[0]));
@@ -499,6 +714,11 @@ ccv_nnc_cmd_t ccv_nnc_cmd_autotune(const ccv_nnc_cmd_t cmd, const size_t max_wor
 			}
 			ccfree(copy_inputs);
 		}
+		const ccv_nnc_cmd_autotune_val_t val = {
+			.backend = tuned_cmd.backend,
+			.algorithm = tuned_cmd.algorithm
+		};
+		kh_val(g_autotune_executable_cache, kiter) = val;
 		return tuned_cmd;
 	}
 	// We need to have trial loop through all the data.
@@ -574,6 +794,11 @@ ccv_nnc_cmd_t ccv_nnc_cmd_autotune(const ccv_nnc_cmd_t cmd, const size_t max_wor
 			ccv_nnc_tensor_view_free(allocated_output_views[i]);
 	}
 	ccfree(copy_inputs);
+	const ccv_nnc_cmd_autotune_val_t val = {
+		.backend = tuned_cmd.backend,
+		.algorithm = tuned_cmd.algorithm
+	};
+	kh_val(g_autotune_executable_cache, kiter) = val;
 	return tuned_cmd;
 }
 
@@ -714,10 +939,28 @@ void ccv_nnc_set_profiler(int state)
 #endif
 }
 
-void ccv_nnc_set_memory_efficient(int state)
+int ccv_nnc_queue_watermark(void)
+{
+#ifdef HAVE_MPS
+	return ccv_nnc_mps_queue_watermark();
+#else
+	return 0;
+#endif
+}
+
+void ccv_nnc_set_queue_watermark(int watermark)
 {
 #ifdef HAVE_MPS
 	// If we need to be memory efficient, we need to bound how many in-flight command buffers there are.
-	ccv_nnc_mps_unbounded_command_buffers(!state);
+	ccv_nnc_mps_set_queue_watermark(watermark);
+#endif
+}
+
+void ccv_nnc_set_device_permutation(const int type, const int* const device_map, const int size)
+{
+	if (type != CCV_STREAM_CONTEXT_GPU)
+		return;
+#ifdef HAVE_CUDA
+	cusetdevicemap(device_map, size);
 #endif
 }

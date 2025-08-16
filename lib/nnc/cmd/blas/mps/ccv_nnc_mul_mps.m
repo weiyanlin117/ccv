@@ -114,13 +114,13 @@ static int _ccv_nnc_mul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 
 	const float p = cmd.info.blas.a[0];
 	const ccv_nnc_tensor_view_t* const g = (const ccv_nnc_tensor_view_t*)inputs[0] ? : 0;
-	const ccv_nnc_tensor_view_t* const b1 = (const ccv_nnc_tensor_view_t*)inputs[2];
-	ccv_nnc_tensor_view_t* const b2 = (ccv_nnc_tensor_view_t*)inputs[1];
+	const ccv_nnc_tensor_view_t* const b1 = (input_size >= 3) ? (const ccv_nnc_tensor_view_t*)inputs[2] : 0;
+	ccv_nnc_tensor_view_t* const b2 = (input_size >= 2) ? (ccv_nnc_tensor_view_t*)inputs[1] : 0;
 
 	ccv_nnc_tensor_view_t* const a = (ccv_nnc_tensor_view_t*)outputs[0];
 	ccv_nnc_tensor_view_t* const h = output_size > 1 ? (ccv_nnc_tensor_view_t*)outputs[1] : 0;
-	const int b2_nd = ccv_nnc_tensor_nd(b1->info.dim);
-	const int b1_nd = ccv_nnc_tensor_nd(b2->info.dim);
+	const int b2_nd = b2 ? ccv_nnc_tensor_nd(b2->info.dim) : 0;
+	const int b1_nd = b1 ? ccv_nnc_tensor_nd(b1->info.dim) : 0;
 	const int g_nd = ccv_max(b2_nd, b1_nd);
 	const int offset = CCV_NNC_MAX_DIM + 2 - g_nd;
 	if (a)
@@ -131,9 +131,10 @@ static int _ccv_nnc_mul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 
 	@autoreleasepool {
 		NSMutableArray<NSNumber*>* mps_g_shape = [[NSMutableArray new] autorelease];	
-		for (int i = offset; i < CCV_NNC_MAX_DIM + 2; i++){
+		for (int i = offset; i < CCV_NNC_MAX_DIM + 2; i++)
+		{
 			[mps_g_shape addObject:@(gdim[i])]; // still need mps_g_shape for target broadcast shape
-			gdim[i-offset] = gdim[i]; // move forward to align info.dim format 
+			gdim[i - offset] = gdim[i]; // move forward to align info.dim format 
 		}               
 		const int* gdim_a = gdim;
 
@@ -285,7 +286,7 @@ static int _ccv_nnc_mul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 REGISTER_COMMAND_BACKEND(CCV_NNC_MUL_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_mul_back;
@@ -294,7 +295,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_MUL_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_
 REGISTER_COMMAND_BACKEND(CCV_NNC_MUL_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_mul_forw;
@@ -319,7 +320,7 @@ static int _ccv_nnc_scalar_mul_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_
 			else
 				ccv_nnc_mps_export_data(data_a, command_buffer, c, c->info.dim, c->stride);
 			[graph release];
-		} else if (p == 0.5 || p == 2 || p == 1.0 / 3 || p == 3 || p == 1.0 / 10 || p == 10) { // Only create specialized kernels for special p values.
+		} else if (p == 0.5 || p == 2 || p == 1.0 / 3 || p == 3 || p == 1.0 / 10 || p == 10 || p == 4 || p == 1.0 / 4 || p == 8 || p == 1.0 / 8) { // Only create specialized kernels for special p values.
 			ccv_nnc_mps_graph_key_t key = ccv_nnc_mps_graph_key_new(cmd, 0, hint, flags, inputs, input_size, outputs, output_size);
 			int indices[1];
 			MPSGraphExecutable* executable = ccv_nnc_mps_graph_executable_cache(key, indices, ^void (MPSGraph* graph, NSMutableArray<MPSGraphTensor*>* inputTensors, NSMutableArray<MPSGraphShapedType*>* inputShapedTypes, NSMutableArray<MPSGraphTensor*>* resultTensors) {
@@ -328,9 +329,18 @@ static int _ccv_nnc_scalar_mul_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_
 				[inputTensors addObject:mps_input_a];
 				MPSGraphShapedType* mps_a_shape = ccv_nnc_mps_graph_tensor_input_shape(a, a->info.dim, a->stride);
 				[inputShapedTypes addObject:mps_a_shape];
-				MPSGraphTensor* mps_p = [graph constantWithScalar:p dataType:ccv_nnc_mps_datatype(a->info.datatype)];
-				MPSGraphTensor* mps_c = [graph multiplicationWithPrimaryTensor:mps_a secondaryTensor:mps_p name:nil];
-				[resultTensors addObject:mps_c];
+				if (a->info.datatype == CCV_32S)
+				{
+					mps_a = [graph castTensor:mps_a toType:MPSDataTypeFloat32 name:nil];
+					MPSGraphTensor* mps_p = [graph constantWithScalar:p dataType:MPSDataTypeFloat32];
+					MPSGraphTensor* mps_c = [graph multiplicationWithPrimaryTensor:mps_a secondaryTensor:mps_p name:nil];
+					mps_c = [graph castTensor:mps_c toType:MPSDataTypeInt32 name:nil];
+					[resultTensors addObject:mps_c];
+				} else {
+					MPSGraphTensor* mps_p = [graph constantWithScalar:p dataType:ccv_nnc_mps_datatype(a->info.datatype)];
+					MPSGraphTensor* mps_c = [graph multiplicationWithPrimaryTensor:mps_a secondaryTensor:mps_p name:nil];
+					[resultTensors addObject:mps_c];
+				}
 			});
 			MPSGraphTensorData* data_a = ccv_nnc_mps_graph_tensor_data(a, a->info.dim, a->stride);
 			ccv_nnc_mps_graph_executable_result(executable, command_buffer, @[data_a], &c, (int*[]){ c->info.dim }, (int*[]){ c->stride }, 1, 0);
@@ -345,16 +355,24 @@ static int _ccv_nnc_scalar_mul_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_
 				[inputTensors addObject:mps_input_a];
 				MPSGraphShapedType* mps_a_shape = ccv_nnc_mps_graph_tensor_input_shape(a, a->info.dim, a->stride);
 				[inputShapedTypes addObject:mps_a_shape];
-				MPSGraphTensor* mps_p = [graph placeholderWithShape:@[@1] dataType:ccv_nnc_mps_datatype(a->info.datatype) name:nil];
+				MPSGraphTensor* mps_p = [graph placeholderWithShape:@[@1] dataType:(a->info.datatype == CCV_32S ? MPSDataTypeFloat32 : ccv_nnc_mps_datatype(a->info.datatype)) name:nil];
 				[inputTensors addObject:mps_p];
 				MPSGraphShapedType* mps_p_shape = [[MPSGraphShapedType alloc] initWithShape:@[@1] dataType:ccv_nnc_mps_datatype(a->info.datatype)];
 				[inputShapedTypes addObject:mps_p_shape];
 				[mps_p_shape release];
-				MPSGraphTensor* mps_c = [graph multiplicationWithPrimaryTensor:mps_a secondaryTensor:mps_p name:nil];
-				[resultTensors addObject:mps_c];
+				if (a->info.datatype == CCV_32S)
+				{
+					mps_a = [graph castTensor:mps_a toType:MPSDataTypeFloat32 name:nil];
+					MPSGraphTensor* mps_c = [graph multiplicationWithPrimaryTensor:mps_a secondaryTensor:mps_p name:nil];
+					mps_c = [graph castTensor:mps_c toType:MPSDataTypeInt32 name:nil];
+					[resultTensors addObject:mps_c];
+				} else {
+					MPSGraphTensor* mps_c = [graph multiplicationWithPrimaryTensor:mps_a secondaryTensor:mps_p name:nil];
+					[resultTensors addObject:mps_c];
+				}
 			});
 			MPSGraphTensorData* data_a = ccv_nnc_mps_graph_tensor_data(a, a->info.dim, a->stride);
-			MPSGraphTensorData* data_p = ccv_nnc_mps_graph_constant_data(p, a->info.datatype);
+			MPSGraphTensorData* data_p = ccv_nnc_mps_graph_constant_data(p, a->info.datatype == CCV_32S ? CCV_32F : a->info.datatype);
 			MPSGraphTensorData* data[] = {data_a, data_p};
 			ccv_nnc_mps_graph_executable_result(executable, command_buffer, @[data[indices[0]], data[indices[1]]], &c, (int*[]){ c->info.dim }, (int*[]){ c->stride }, 1, 0);
 		}
@@ -425,7 +443,7 @@ static int _ccv_nnc_scalar_mul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_
 REGISTER_COMMAND_BACKEND(CCV_NNC_SCALAR_MUL_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_32S | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_scalar_mul_forw;
@@ -434,7 +452,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_SCALAR_MUL_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nn
 REGISTER_COMMAND_BACKEND(CCV_NNC_SCALAR_MUL_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_scalar_mul_back;

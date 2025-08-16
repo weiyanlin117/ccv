@@ -156,6 +156,11 @@ static int _ccv_nnc_gemm_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 				mtl_data_type = 16;
 				break;
 			}
+			case CCV_16BF: {
+				is_supported_dtype = 1;
+				mtl_data_type = 121;
+				break;
+			}
 			case CCV_32F: {
 				is_supported_dtype = 1;
 				mtl_data_type = 3;
@@ -642,6 +647,11 @@ static int _ccv_nnc_gemm_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 				mtl_data_type = 16;
 				break;
 			}
+			case CCV_16BF: {
+				is_supported_dtype = 1;
+				mtl_data_type = 121;
+				break;
+			}
 			case CCV_32F: {
 				is_supported_dtype = 1;
 				mtl_data_type = 3;
@@ -783,6 +793,7 @@ static int _ccv_nnc_gemm_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						.B_trans = (is_transpose_w ? 1 : 0),
 						.D_trans = 0,
 						.fused_bias = 0,
+						.register_float = 1,
 
 						.batch_dimension = g_batch_size,
 						.batch_stride_a = w_batch_size > 1 ? w_rows * w_cols : 0,
@@ -802,6 +813,7 @@ static int _ccv_nnc_gemm_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						.B_trans = (is_transpose_w ? 0 : 1),
 						.D_trans = 0,
 						.fused_bias = 0,
+						.register_float = 1,
 
 						.batch_dimension = g_batch_size,
 						.batch_stride_a = g_batch_size > 1 ? g_rows * w_cols : 0,
@@ -829,6 +841,7 @@ static int _ccv_nnc_gemm_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						.B_trans = (is_transpose_a ? 1 : 0),
 						.D_trans = 0,
 						.fused_bias = 0,
+						.register_float = 1,
 
 						.batch_dimension = g_batch_size,
 						.batch_stride_a = g_batch_size > 1 ? dw_cols * g_rows : 0,
@@ -848,6 +861,7 @@ static int _ccv_nnc_gemm_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						.B_trans = 0,
 						.D_trans = 0,
 						.fused_bias = 0,
+						.register_float = 1,
 
 						.batch_dimension = g_batch_size,
 						.batch_stride_a = a_batch_size > 1 ? dw_rows * g_rows : 0,
@@ -1203,7 +1217,7 @@ static int _ccv_nnc_gemm_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 REGISTER_COMMAND_BACKEND(CCV_NNC_GEMM_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW;
-	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_gemm_forw;
@@ -1212,7 +1226,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_GEMM_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_
 REGISTER_COMMAND_BACKEND(CCV_NNC_GEMM_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_QX | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_gemm_back;

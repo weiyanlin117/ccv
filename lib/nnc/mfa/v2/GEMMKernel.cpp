@@ -124,7 +124,9 @@ GEMMKernel::GEMMKernel(GEMMKernelDescriptor descriptor, MTL::Device *const devic
   preferAsyncLoad = descriptor.preferAsyncLoad;
   preferAsyncStore = descriptor.preferAsyncStore;
   useBias = descriptor.useBias;
+  loadM = descriptor.loadM;
   threadgroupSize = 32 * splits[0] * splits[1];
+  disableAsyncCopy = false;
   
   // Validate the correctness of register precisions.
   auto checkOperandPair =
@@ -216,15 +218,24 @@ GEMMKernel::GEMMKernel(GEMMKernelDescriptor descriptor, MTL::Device *const devic
     descriptor.leadingBlockDimensions.value_or(simd::ushort3())[2], false,
     blockDimensions[0], blockDimensions[1]);
 
-  source = createSource();
-
   threadgroupMemoryAllocation = createThreadgroupMemoryAllocation();
+
+  source = createSource();
 
   // Compile the shader source.
   {
     auto string = NS::String::string(source.c_str(), NS::UTF8StringEncoding);
     NS::Error* error = nil;
     library = NS::TransferPtr(device->newLibrary(string, nil, &error));
+    if (error) {
+      preferAsyncLoad = false;
+      preferAsyncStore = false;
+      disableAsyncCopy = true;
+      source = createSource();
+      string = NS::String::string(source.c_str(), NS::UTF8StringEncoding);
+      error = nil;
+      library = NS::TransferPtr(device->newLibrary(string, nil, &error));
+    }
     CCV_NNC_MFA_CHECK_ERROR(error);
   }
 }
@@ -237,7 +248,7 @@ std::string GEMMKernel::createSource() const noexcept {
   bool injectBF16Methods = (memoryPrecisions.A == GEMMOperandPrecision::BF16) || (memoryPrecisions.B == GEMMOperandPrecision::BF16) || (memoryPrecisions.C == GEMMOperandPrecision::BF16) || (memoryPrecisions.bias == GEMMOperandPrecision::BF16);
 
   // Inject the contents of the headers.
-  source += createMetalSimdgroupEvent() + "\n";
+  source += createMetalSimdgroupEvent(disableAsyncCopy) + "\n";
   source += createMetalSimdgroupMatrixStorage(injectBF16Methods) + "\n";
   source += "using namespace metal;\n\n";
 
@@ -261,6 +272,11 @@ std::string GEMMKernel::createSource() const noexcept {
   source.SetValue("REGISTER_NAME_C", registerName('C'));
   source.SetValue("REGISTER_NAME_BIAS", registerName('S'));
   source.SetValue("SPLITS_N", std::to_string(splits[1]));
+  if (disableAsyncCopy) {
+    source.SetValue("ASYNC_LANE_ID", ", lane_id");
+  } else {
+    source.SetValue("ASYNC_LANE_ID", "");
+  }
 
   createUtilities(&source);
 
@@ -297,6 +313,17 @@ kernel void gemm(device {{MEMORY_NAME_A}} *A [[buffer(0)]],
     source += R"(
                  device {{MEMORY_NAME_BIAS}} *bias [[buffer(3)]],
 )";
+    if (loadM) {
+      source += R"(
+                   device uint *loadM [[buffer(4)]],
+)";
+    }
+  } else {
+    if (loadM) {
+      source += R"(
+                   device uint *loadM [[buffer(3)]],
+)";
+    }
   }
   source += R"(
                  threadgroup uchar *threadgroup_block [[threadgroup(0)]],
@@ -317,6 +344,22 @@ kernel void gemm(device {{MEMORY_NAME_A}} *A [[buffer(0)]],
   }
   source += R"(
   }
+)";
+  if (loadM) {
+    source += R"(
+  const uint M = loadM[0];
+  // Thresholds that mark the matrix edge.
+  const uint M_edge = M - (M % M_group);
+  // Find the number of elements in the final block. If the matrix
+  // dimensions are perfectly divisibly by block dimensions, we don't want
+  // this value to be zero. The final block is a full block.
+  const ushort M_remainder = (M % {{REGISTER_M}} == 0)
+    ? {{REGISTER_M}} : M % {{REGISTER_M}};
+  // Shift the final block, so it doesn't access out-of-bounds memory.
+  const ushort M_shift = (M < M_group) ? 0 : {{REGISTER_M}} - M_remainder;
+)";
+  }
+  source += R"(
   ushort2 sid(sidx % {{SPLITS_N}}, sidx / {{SPLITS_N}});
   ushort2 morton_offset = morton_order(lane_id);
   
@@ -385,7 +428,6 @@ std::string GEMMKernel::createConstants() const noexcept {
 // - The rows of the matrix must be contiguous in memory. Supporting strides
 //   that differ from the actual matrix dimensions should not be difficult, but
 //   it is out of scope for this reference kernel.
-constant uint M [[function_constant(0)]];
 constant uint N [[function_constant(1)]];
 constant uint K [[function_constant(2)]];
 
@@ -422,14 +464,11 @@ constant ushort N_group = {{BLOCK_DIMENSIONS_N}};
 constant ushort K_group = {{BLOCK_DIMENSIONS_K}};
 
 // Thresholds that mark the matrix edge.
-constant uint M_edge = M - (M % M_group);
 constant uint N_edge = N - (N % N_group);
 
 // Find the number of elements in the final block. If the matrix
 // dimensions are perfectly divisibly by block dimensions, we don't want
 // this value to be zero. The final block is a full block.
-constant ushort M_remainder = (M % {{REGISTER_M}} == 0)
-  ? {{REGISTER_M}} : M % {{REGISTER_M}};
 constant ushort N_remainder = (N % {{REGISTER_N}} == 0)
   ? {{REGISTER_N}} : N % {{REGISTER_N}};
 constant ushort K_remainder = (K % K_group == 0)
@@ -437,10 +476,23 @@ constant ushort K_remainder = (K % K_group == 0)
 constant ushort K_remainder_padded = (K_remainder + 7) / 8 * 8;
 
 // Shift the final block, so it doesn't access out-of-bounds memory.
-constant ushort M_shift = (M < M_group) ? 0 : {{REGISTER_M}} - M_remainder;
 constant ushort N_shift = (N < N_group) ? 0 : {{REGISTER_N}} - N_remainder;
 
 )";
+  if (!loadM) {
+    constants += R"(
+constant uint M [[function_constant(0)]];
+// Thresholds that mark the matrix edge.
+constant uint M_edge = M - (M % M_group);
+// Find the number of elements in the final block. If the matrix
+// dimensions are perfectly divisibly by block dimensions, we don't want
+// this value to be zero. The final block is a full block.
+constant ushort M_remainder = (M % {{REGISTER_M}} == 0)
+  ? {{REGISTER_M}} : M % {{REGISTER_M}};
+// Shift the final block, so it doesn't access out-of-bounds memory.
+constant ushort M_shift = (M < M_group) ? 0 : {{REGISTER_M}} - M_remainder;
+)";
+  }
   return constants;
 }
 
@@ -639,9 +691,9 @@ void GEMMKernel::createInitializeC(CodeWriter *source) const noexcept {
 
       // Issue an async copy.
       simdgroup_event event;
-      event.async_copy(
-        bias_dst, 1, ushort2(bias_tile_dimension, 1),
-        bias_src, 1, ushort2(bias_tile_dimension, 1));
+      event.async_copy<32>(
+        bias_dst, bias_tile_dimension,
+        bias_src, bias_tile_dimension{{ASYNC_LANE_ID}});
       simdgroup_event::wait(1, &event);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -739,9 +791,8 @@ if ({{DIRECT_ACCESS_CONDITION}}) {
       C, {{LEADING_DIMENSION_C}}, C_offset);
     
     simdgroup_event event;
-    event.async_copy(
-      C_block, {{LEADING_BLOCK_DIMENSIONS_C}}, C_tile,
-      C_dst, {{LEADING_DIMENSION_C}}, C_tile);
+    event.async_copy<{{LEADING_BLOCK_DIMENSIONS_C}}, 32>(
+      C_block, C_tile, C_dst, {{LEADING_DIMENSION_C}}, C_tile{{ASYNC_LANE_ID}});
     simdgroup_event::wait(1, &event);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -833,9 +884,8 @@ if ({{DIRECT_ACCESS_CONDITION}}) {
     }
     
     simdgroup_event event;
-    event.async_copy(
-      C_dst, {{LEADING_DIMENSION_C}}, C_tile,
-      C_block, {{LEADING_BLOCK_DIMENSIONS_C}}, C_tile);
+    event.async_copy<{{LEADING_BLOCK_DIMENSIONS_C}}, 32>(
+      C_dst, {{LEADING_DIMENSION_C}}, C_tile, C_block, C_tile{{ASYNC_LANE_ID}});
   }
 }
 )";
@@ -907,15 +957,12 @@ for (uint k = {{ASYNC_ITERATIONS_START}}; k < K; k += K_group) {
     ushort2 B_tile_dst(N_tile_dimension, K_tile_padded);
 
     simdgroup_event events[2];
-    events[0].async_copy(
-      A_block, {{LEADING_BLOCK_DIMENSIONS_A}}, A_tile_dst,
-      A_src, {{LEADING_DIMENSION_A}}, A_tile_src, A_trans);
-    events[1].async_copy(
-      B_block, {{LEADING_BLOCK_DIMENSIONS_B}}, B_tile_dst,
-      B_src, {{LEADING_DIMENSION_B}}, B_tile_src, B_trans);
+    events[0].async_copy<{{LEADING_BLOCK_DIMENSIONS_A}}, 32>(
+      A_block, A_tile_dst, A_src, {{LEADING_DIMENSION_A}}, A_tile_src{{ASYNC_LANE_ID}}, A_trans);
+    events[1].async_copy<{{LEADING_BLOCK_DIMENSIONS_B}}, 32>(
+      B_block, B_tile_dst, B_src, {{LEADING_DIMENSION_B}}, B_tile_src{{ASYNC_LANE_ID}}, B_trans);
     simdgroup_event::wait(2, events);
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
   
   ushort2 A_block_offset(morton_offset.x, offset_in_group.y);
   ushort2 B_block_offset(offset_in_group.x, morton_offset.y);
@@ -925,6 +972,8 @@ for (uint k = {{ASYNC_ITERATIONS_START}}; k < K; k += K_group) {
     A_block_src, {{LEADING_BLOCK_DIMENSIONS_A}}, A_block_offset, A_trans);
   B_block_src = simdgroup_matrix_storage<{{MEMORY_NAME_B}}>::apply_offset(
     B_block_src, {{LEADING_BLOCK_DIMENSIONS_B}}, B_block_offset, B_trans);
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   
   simdgroup_matrix_storage<{{REGISTER_NAME_A}}> A_sram[
     {{REGISTER_M_8}} * (K_group / 8)];

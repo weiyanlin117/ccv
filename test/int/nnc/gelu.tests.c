@@ -95,8 +95,10 @@ TEST_CASE("gelu in half precision")
 
 TEST_CASE("gelu gradient in float")
 {
-	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
-		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF));
+	GUARD_ELSE_RETURN((ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF)) || 
+		(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_MPS) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_MPS)));
 	ccv_nnc_symbolic_graph_t* const symbolic_graph = ccv_nnc_symbolic_graph_new();
 	ccv_nnc_tensor_symbol_t x = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 32F, 10, 100), "x");
 	ccv_nnc_tensor_symbol_t y = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 32F, 10, 100), "y");
@@ -215,8 +217,10 @@ TEST_CASE("mps gelu gradient in float")
 
 TEST_CASE("gelu gradient in half precision")
 {
-	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
-		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF));
+	GUARD_ELSE_RETURN((ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF)) || 
+		(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_MPS) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_MPS)));
 	ccv_nnc_symbolic_graph_t* const symbolic_graph = ccv_nnc_symbolic_graph_new();
 	ccv_nnc_tensor_symbol_t x = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 16F, 10, 100), "x");
 	ccv_nnc_tensor_symbol_t y = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 16F, 10, 100), "y");
@@ -441,8 +445,10 @@ TEST_CASE("fast gelu in half precision")
 
 TEST_CASE("fast gelu gradient in float")
 {
-	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
-		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF));
+	GUARD_ELSE_RETURN((ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF)) || 
+		(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_MPS) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_MPS)));
 	ccv_nnc_symbolic_graph_t* const symbolic_graph = ccv_nnc_symbolic_graph_new();
 	ccv_nnc_tensor_symbol_t x = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 32F, 10, 100), "x");
 	ccv_nnc_tensor_symbol_t y = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 32F, 10, 100), "y");
@@ -501,8 +507,11 @@ TEST_CASE("fast gelu gradient in float")
 
 TEST_CASE("fast gelu gradient in half precision")
 {
-	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
-		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF));
+	GUARD_ELSE_RETURN((ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_GPU_REF)) || 
+		(ccv_nnc_cmd_ok(CCV_NNC_GELU_FORWARD, CCV_NNC_BACKEND_MPS) &&
+		ccv_nnc_cmd_ok(CCV_NNC_GELU_BACKWARD, CCV_NNC_BACKEND_MPS)));
+
 	ccv_nnc_symbolic_graph_t* const symbolic_graph = ccv_nnc_symbolic_graph_new();
 	ccv_nnc_tensor_symbol_t x = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 16F, 10, 100), "x");
 	ccv_nnc_tensor_symbol_t y = ccv_nnc_tensor_symbol_new(symbolic_graph, GPU_TENSOR_NHWC(000, 16F, 10, 100), "y");

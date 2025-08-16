@@ -1439,6 +1439,27 @@ void ccv_float_to_half_precision(const float* f, uint16_t* h, size_t len)
 		h[i] = _ccv_base_table[(u[i] >> 23) & 0x1ff] + ((u[i] & 0x007fffff) >> _ccv_shift_table[(u[i] >> 23) & 0x1ff]);
 }
 
+void ccv_float_to_bfloat(const float* f, uint16_t* h, size_t len)
+{
+	int i;
+	const uint16_t* u = (const uint16_t*)f;
+	for (i = 0; i < len; i++)
+		h[i] = u[i * 2 + 1];
+}
+
+void ccv_bfloat_to_half_precision(const uint16_t* h, uint16_t* f, size_t len)
+{
+	int i;
+	for (i = 0; i < len; i++)
+	{
+		union {
+			uint16_t h[2];
+			uint32_t p;
+		} u = { .h = { 0, f[i] } };
+		f[i] = _ccv_base_table[(u.p >> 23) & 0x1ff] + ((u.p & 0x007fffff) >> _ccv_shift_table[(u.p >> 23) & 0x1ff]);
+	}
+}
+
 void ccv_double_to_half_precision(const double* f, uint16_t* h, size_t len)
 {
 	int i;
@@ -1449,6 +1470,19 @@ void ccv_double_to_half_precision(const double* f, uint16_t* h, size_t len)
 			uint32_t p;
 		} u = { .v = (const float)f[i] };
 		h[i] = _ccv_base_table[(u.p >> 23) & 0x1ff] + ((u.p & 0x007fffff) >> _ccv_shift_table[(u.p >> 23) & 0x1ff]);
+	}
+}
+
+void ccv_double_to_bfloat(const double* f, uint16_t* h, size_t len)
+{
+	int i;
+	for (i = 0; i < len; i++)
+	{
+		union {
+			float v;
+			uint16_t h[2];
+		} u = { .v = (const float)f[i] };
+		h[i] = u.h[1];
 	}
 }
 
@@ -1741,6 +1775,32 @@ void ccv_half_precision_to_float(const uint16_t* h, float* f, size_t len)
 		u[i] = _ccv_mantissa_table[_ccv_offset_table[h[i] >> 10] + (h[i] & 0x3ff)] + _ccv_exponent_table[h[i] >> 10];
 }
 
+void ccv_bfloat_to_float(const uint16_t* h, float* f, size_t len)
+{
+	int i;
+	uint16_t* u = (uint16_t*)f;
+	for (i = 0; i < len; i++)
+	{
+		u[i * 2] = 0;
+		u[i * 2 + 1] = h[i];
+	}
+}
+
+void ccv_half_precision_to_bfloat(const uint16_t* h, uint16_t* f, size_t len)
+{
+	int i;
+	for (i = 0; i < len; i++)
+	{
+		union {
+			uint16_t h[2];
+			uint32_t p;
+		} u = {
+			.p = _ccv_mantissa_table[_ccv_offset_table[h[i] >> 10] + (h[i] & 0x3ff)] + _ccv_exponent_table[h[i] >> 10]
+		};
+		f[i] = u.h[1];
+	}
+}
+
 void ccv_half_precision_to_double(const uint16_t* h, double* f, size_t len)
 {
 	int i;
@@ -1752,6 +1812,19 @@ void ccv_half_precision_to_double(const uint16_t* h, double* f, size_t len)
 		} u = {
 			.p = _ccv_mantissa_table[_ccv_offset_table[h[i] >> 10] + (h[i] & 0x3ff)] + _ccv_exponent_table[h[i] >> 10]
 		};
+		f[i] = u.v;
+	}
+}
+
+void ccv_bfloat_to_double(const uint16_t* h, double* f, size_t len)
+{
+	int i;
+	for (i = 0; i < len; i++)
+	{
+		union {
+			float v;
+			uint16_t h[2];
+		} u = { .h = { 0, h[1] } };
 		f[i] = u.v;
 	}
 }

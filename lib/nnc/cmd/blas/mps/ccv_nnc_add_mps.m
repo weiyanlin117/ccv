@@ -97,15 +97,15 @@ static int _ccv_nnc_add_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 		}
 
 		if (use_mfa) {
-			if (a->info.datatype != CCV_16F && a->info.datatype != CCV_32F) {
+			if (a->info.datatype != CCV_16F && a->info.datatype != CCV_32F && a->info.datatype != CCV_16BF) {
 				use_mfa = false;
 				fallback_reason = "Unsupported data type.";
 			}
-			if (b->info.datatype != CCV_16F && b->info.datatype != CCV_32F) {
+			if (b->info.datatype != CCV_16F && b->info.datatype != CCV_32F && b->info.datatype != CCV_16BF) {
 				use_mfa = false;
 				fallback_reason = "Unsupported data type.";
 			}
-			if (c->info.datatype != CCV_16F && c->info.datatype != CCV_32F) {
+			if (c->info.datatype != CCV_16F && c->info.datatype != CCV_32F && c->info.datatype != CCV_16BF) {
 				use_mfa = false;
 				fallback_reason = "Unsupported data type.";
 			}
@@ -136,6 +136,10 @@ static int _ccv_nnc_add_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 					mtl_data_type = 16;
 					break;
 				}
+				case CCV_16BF: {
+					mtl_data_type = 121;
+					break;
+				}
 				case CCV_32F: {
 					mtl_data_type = 3;
 					break;
@@ -150,6 +154,7 @@ static int _ccv_nnc_add_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 		if (use_mfa) {
 			mtl_command_batch_t* command_batch = ccv_nnc_stream_context_start_command_batch(stream_context);
 			ccv_nnc_mfa_add_params_t params = {
+				.args = 2,
 				.data_type = mtl_data_type,
 				.length = (uint32_t)length,
 			};
@@ -278,8 +283,36 @@ static int _ccv_nnc_add_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 
 	@autoreleasepool {
 		MPSCommandBuffer* command_buffer = ccv_nnc_stream_context_start_mps_command_buffer(stream_context);
+		int a_transferred = 0;
+		int b_transferred = 0;
+		if (CCV_IS_TENSOR_CONTIGUOUS(g))
+		{
+			const size_t tensor_count = ccv_nnc_tensor_count(g->info);
+			id<MTLBuffer> buffer_g = mpgetbuffer((ccv_nnc_tensor_t*)g);
+			const off_t offset_g = mpgetoffset((ccv_nnc_tensor_t*)g);
+			const size_t size = (ssize_t)ccv_nnc_tensor_count(g->info) * CCV_GET_DATA_TYPE_SIZE(g->info.datatype);
+			if (a && CCV_IS_TENSOR_CONTIGUOUS(a) && p == 1 && ccv_nnc_tensor_count(a->info) == tensor_count)
+			{
+				id<MTLBuffer> buffer_a = mpgetbuffer((ccv_nnc_tensor_t*)a);
+				const off_t offset_a = mpgetoffset((ccv_nnc_tensor_t*)a);
+				id<MTLBlitCommandEncoder> encoder = [command_buffer blitCommandEncoder];
+				[encoder copyFromBuffer:buffer_g sourceOffset:offset_g toBuffer:buffer_a destinationOffset:offset_a size:size];
+				[encoder endEncoding];
+				a_transferred = 1;
+			}
+			if (b && CCV_IS_TENSOR_CONTIGUOUS(b) && q == 1 && ccv_nnc_tensor_count(b->info) == tensor_count)
+			{
+				id<MTLBuffer> buffer_b = mpgetbuffer((ccv_nnc_tensor_t*)b);
+				const off_t offset_b = mpgetoffset((ccv_nnc_tensor_t*)b);
+				id<MTLBlitCommandEncoder> encoder = [command_buffer blitCommandEncoder];
+				[encoder copyFromBuffer:buffer_g sourceOffset:offset_g toBuffer:buffer_b destinationOffset:offset_b size:size];
+				[encoder endEncoding];
+				b_transferred = 1;
+			}
+		}
 
-		if (a && b)
+
+		if ((a && !a_transferred) && (b && !b_transferred))
 		{
 				ccv_nnc_mps_graph_key_t a_key = ccv_nnc_mps_graph_key_new(cmd, 0, hint, flags, inputs, input_size, outputs, output_size);
 				int indices[1];
@@ -327,7 +360,7 @@ static int _ccv_nnc_add_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 				MPSGraphTensorData* data[] = {data_g};
 				ccv_nnc_mps_graph_executable_result(executable, command_buffer, @[data[indices[0]]], (ccv_nnc_tensor_view_t* []){ a, b }, (int*[]){ a->info.dim, b->info.dim }, (int*[]){ a->stride, b->stride }, 2, 0);
 		} else {
-			if (a) {
+			if (a && !a_transferred) {
 				ccv_nnc_mps_graph_key_t a_key = ccv_nnc_mps_graph_key_new(cmd, 1, hint, flags, inputs, input_size, outputs, output_size);
 				int indices[1];
 				MPSGraphExecutable* executable = ccv_nnc_mps_graph_executable_cache(a_key, indices, ^void (MPSGraph* graph, NSMutableArray<MPSGraphTensor*>* inputTensors, NSMutableArray<MPSGraphShapedType*>* inputShapedTypes, NSMutableArray<MPSGraphTensor*>* resultTensors) {
@@ -358,7 +391,7 @@ static int _ccv_nnc_add_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 				MPSGraphTensorData* data[] = {data_g};
 				ccv_nnc_mps_graph_executable_result(executable, command_buffer, @[data[indices[0]]], (ccv_nnc_tensor_view_t* []){ a }, (int*[]){ a->info.dim }, (int*[]){ a->stride }, 1, 0);
 			}
-			if (b) {
+			if (b && !b_transferred) {
 				ccv_nnc_mps_graph_key_t b_key = ccv_nnc_mps_graph_key_new(cmd, 2, hint, flags, inputs, input_size, outputs, output_size);
 				int indices[1];
 				MPSGraphExecutable* executable = ccv_nnc_mps_graph_executable_cache(b_key, indices, ^void (MPSGraph* graph, NSMutableArray<MPSGraphTensor*>* inputTensors, NSMutableArray<MPSGraphShapedType*>* inputShapedTypes, NSMutableArray<MPSGraphTensor*>* resultTensors) {
@@ -399,7 +432,7 @@ static int _ccv_nnc_add_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 REGISTER_COMMAND_BACKEND(CCV_NNC_ADD_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_add_forw;
@@ -408,7 +441,7 @@ REGISTER_COMMAND_BACKEND(CCV_NNC_ADD_FORWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_b
 REGISTER_COMMAND_BACKEND(CCV_NNC_ADD_BACKWARD, CCV_NNC_BACKEND_MPS)(ccv_nnc_cmd_backend_registry_t* const registry)
 {
 	registry->tensor_formats = CCV_TENSOR_FORMAT_NHWC | CCV_TENSOR_FORMAT_NCHW | CCV_TENSOR_FORMAT_CHWN;
-	registry->tensor_datatypes = CCV_32F | CCV_16F;
+	registry->tensor_datatypes = CCV_32F | CCV_16F | CCV_16BF;
 	registry->tensor_memory = CCV_TENSOR_GPU_MEMORY;
 	registry->algorithms = 1;
 	registry->exec = _ccv_nnc_add_back;

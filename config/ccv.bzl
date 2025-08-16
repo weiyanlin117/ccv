@@ -98,13 +98,13 @@ def ccv_deps():
         git_repository,
         name = "build_bazel_rules_cuda",
         remote = "https://github.com/liuliu/rules_cuda.git",
-        commit = "be346d4d12883469878edd693097f87723400c5b",
-        shallow_since = "1681409802 -0400"
+	    commit = "73a24ae7205766427c8b159acd9326729abef3d4",
+	    shallow_since = "1753382341 -0400"
     )
     _maybe(
         http_archive,
         name = "sqlite3",
-        sha256 = "87775784f8b22d0d0f1d7811870d39feaa7896319c7c20b849a4181c5a50609b",
-        urls = ["https://www.sqlite.org/2022/sqlite-amalgamation-3390200.zip"],
+        sha256 = "9ad6d16cbc1df7cd55c8b55127c82a9bca5e9f287818de6dc87e04e73599d754",
+        urls = ["https://www.sqlite.org/2025/sqlite-amalgamation-3500300.zip"],
         build_file = "@ccv//:external/sqlite3.BUILD"
     )

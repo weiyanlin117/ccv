@@ -67,6 +67,25 @@ __global__ void _ccv_nnc_pad_zero_forw_4d(const NUM* const ap, const int begin3,
 }
 
 template<typename NUM>
+__global__ void _ccv_nnc_pad_zero_forw_5d(const NUM* const ap, const int begin4, const int begin3, const int begin2, const int begin1, const int begin0, const int adim4, const int adim3, const int adim2, const int adim1, const int adim0, NUM* const bp, const int bdim43210, const int bdim3, const int bdim2, const int bdim1, const int bdim0)
+{
+	CUDA_1D_KERNEL_LOOP(i, bdim43210) {
+		const int x = i % bdim0;
+		int y = i / bdim0;
+		int z = y / bdim1;
+		y = y % bdim1;
+		int u = z / bdim2;
+		z = z % bdim2;
+		const int v = u / bdim3;
+		u = u % bdim3;
+		if (x - begin0 >= 0 && x - begin0 < adim0 && y - begin1 >= 0 && y - begin1 < adim1 && z - begin2 >= 0 && z - begin2 < adim2 && u - begin3 >= 0 && u - begin3 < adim3 && v - begin4 >= 0 && v - begin4 < adim4)
+			bp[i] = ap[((((v - begin4) * adim3 + (u - begin3)) * adim2 + (z - begin2)) * adim1 + (y - begin1)) * adim0 + x - begin0];
+		else
+			bp[i] = 0;
+	}
+}
+
+template<typename NUM>
 __global__ void _ccv_nnc_pad_replicate_forw_1d(const NUM* const ap, const int begin0, const int adim0, NUM* const bp, const int bdim0)
 {
 	CUDA_1D_KERNEL_LOOP(i, bdim0) {
@@ -121,6 +140,27 @@ __global__ void _ccv_nnc_pad_replicate_forw_4d(const NUM* const ap, const int be
 	}
 }
 
+template<typename NUM>
+__global__ void _ccv_nnc_pad_replicate_forw_5d(const NUM* const ap, const int begin4, const int begin3, const int begin2, const int begin1, const int begin0, const int adim4, const int adim3, const int adim2, const int adim1, const int adim0, NUM* const bp, const int bdim43210, const int bdim3, const int bdim2, const int bdim1, const int bdim0)
+{
+	CUDA_1D_KERNEL_LOOP(i, bdim43210) {
+		const int x = i % bdim0;
+		int y = i / bdim0;
+		int z = y / bdim1;
+		y = y % bdim1;
+		int u = z / bdim2;
+		z = z % bdim2;
+		const int v = u / bdim3;
+		u = u % bdim3;
+		const int ax = min(max(x - begin0, 0), adim0 - 1);
+		const int ay = min(max(y - begin1, 0), adim1 - 1);
+		const int az = min(max(z - begin2, 0), adim2 - 1);
+		const int au = min(max(u - begin3, 0), adim3 - 1);
+		const int av = min(max(v - begin4, 0), adim4 - 1);
+		bp[i] = ap[(((av * adim3 + au) * adim2 + az) * adim1 + ay) * adim0 + ax];
+	}
+}
+
 static int _ccv_nnc_pad_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
 {
 	assert(input_size == 1);
@@ -159,6 +199,11 @@ static int _ccv_nnc_pad_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 				_ccv_nnc_pad_zero_forw_4d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3]), CUDA_NUM_THREADS, 0, stream>>>(a->data.f32, begin[0], begin[1], begin[2], begin[3], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], b->data.f32, b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3]);
 			else
 				_ccv_nnc_pad_zero_forw_4d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3]), CUDA_NUM_THREADS, 0, stream>>>((__half*)a->data.f16, begin[0], begin[1], begin[2], begin[3], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], (__half*)b->data.f16, b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3]);
+		} else if (a_nd == 5) {
+			if (a->info.datatype == CCV_32F)
+				_ccv_nnc_pad_zero_forw_5d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3] * b->info.dim[4]), CUDA_NUM_THREADS, 0, stream>>>(a->data.f32, begin[0], begin[1], begin[2], begin[3], begin[4], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], a->info.dim[4], b->data.f32, b->info.dim[4] * b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3], b->info.dim[4]);
+			else
+				_ccv_nnc_pad_zero_forw_5d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3] * b->info.dim[4]), CUDA_NUM_THREADS, 0, stream>>>((__half*)a->data.f16, begin[0], begin[1], begin[2], begin[3], begin[4], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], a->info.dim[4], (__half*)b->data.f16, b->info.dim[4] * b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3], b->info.dim[4]);
 		} else {
 			assert(0);
 		}
@@ -185,6 +230,11 @@ static int _ccv_nnc_pad_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint,
 				_ccv_nnc_pad_replicate_forw_4d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3]), CUDA_NUM_THREADS, 0, stream>>>(a->data.f32, begin[0], begin[1], begin[2], begin[3], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], b->data.f32, b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3]);
 			else
 				_ccv_nnc_pad_replicate_forw_4d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3]), CUDA_NUM_THREADS, 0, stream>>>((__half*)a->data.f16, begin[0], begin[1], begin[2], begin[3], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], (__half*)b->data.f16, b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3]);
+		} else if (a_nd == 5) {
+			if (a->info.datatype == CCV_32F)
+				_ccv_nnc_pad_replicate_forw_5d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3] * b->info.dim[4]), CUDA_NUM_THREADS, 0, stream>>>(a->data.f32, begin[0], begin[1], begin[2], begin[3], begin[4], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], a->info.dim[4], b->data.f32, b->info.dim[4] * b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3], b->info.dim[4]);
+			else
+				_ccv_nnc_pad_replicate_forw_5d<<<CUDA_GET_BLOCKS(b->info.dim[0] * b->info.dim[1] * b->info.dim[2] * b->info.dim[3] * b->info.dim[4]), CUDA_NUM_THREADS, 0, stream>>>((__half*)a->data.f16, begin[0], begin[1], begin[2], begin[3], begin[4], a->info.dim[0], a->info.dim[1], a->info.dim[2], a->info.dim[3], a->info.dim[4], (__half*)b->data.f16, b->info.dim[4] * b->info.dim[3] * b->info.dim[2] * b->info.dim[1] * b->info.dim[0], b->info.dim[1], b->info.dim[2], b->info.dim[3], b->info.dim[4]);
 		} else {
 			assert(0);
 		}

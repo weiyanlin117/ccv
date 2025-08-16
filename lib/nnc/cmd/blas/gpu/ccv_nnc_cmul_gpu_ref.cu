@@ -23,9 +23,9 @@ __global__ void _ccv_nnc_cmul_kernel(const size_t count, const NUM1* const a, co
 }
 
 template<typename NUM1, typename NUM2, typename NUM3>
-__global__ void _ccv_nnc_cmul_kernel_4d_0(const int astride2, const int astride1, const int astride0, const int bstride2, const int bstride1, const int bstride0, const int cstride2, const int cstride1, const int cstride0, const int dim2, const int dim1, const int dim0, const NUM1* const a, const NUM2* const b, NUM3* const c)
+__global__ void _ccv_nnc_cmul_kernel_4d_0(const int z_start, const int astride2, const int astride1, const int astride0, const int bstride2, const int bstride1, const int bstride0, const int cstride2, const int cstride1, const int cstride0, const int dim2, const int dim1, const int dim0, const NUM1* const a, const NUM2* const b, NUM3* const c)
 {
-	const int z = blockIdx.z * blockDim.z + threadIdx.z;
+	const int z = blockIdx.z * blockDim.z + threadIdx.z + z_start;
 	const int y = blockIdx.y * blockDim.y + threadIdx.y;
 	const int x = blockIdx.x * blockDim.x + threadIdx.x;
 	if (y >= dim1 || x >= dim0)
@@ -159,26 +159,35 @@ static int _ccv_nnc_cmul_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 		assert(nd <= 4);
 		if (nd == 4)
 		{
-			if (a->info.datatype == CCV_32F && c->info.datatype == CCV_32F)
+			// Make sure when we launch, the grid.z won't exceed the limit which is 65535.
+			for (i = 0; i < (cdim[2] * cdim[3] + 0xfffe) / 0xffff; i++)
 			{
-				_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2] * cdim[3]), dim3(64, 8, 1), 0, stream>>>(astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, a->data.f32, b->data.f32, c->data.f32);
-			} else if (a->info.datatype == CCV_32F && c->info.datatype == CCV_16F) {
-				_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2] * cdim[3]), dim3(64, 8, 1), 0, stream>>>(astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, a->data.f32, b->data.f32, (__half*)c->data.f16);
-			} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_32F) {
-				_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2] * cdim[3]), dim3(64, 8, 1), 0, stream>>>(astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, (__half*)a->data.f16, (__half*)b->data.f16, c->data.f32);
-			} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_16F) {
-				_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2] * cdim[3]), dim3(64, 8, 1), 0, stream>>>(astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, (__half*)a->data.f16, (__half*)b->data.f16, (__half*)c->data.f16);
+				const int z_start = i * 0xffff;
+				if (a->info.datatype == CCV_32F && c->info.datatype == CCV_32F)
+				{
+					_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] * cdim[3] - z_start, 0xffff)), dim3(64, 8, 1), 0, stream>>>(z_start, astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, a->data.f32, b->data.f32, c->data.f32);
+				} else if (a->info.datatype == CCV_32F && c->info.datatype == CCV_16F) {
+					_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] * cdim[3] - z_start, 0xffff)), dim3(64, 8, 1), 0, stream>>>(z_start, astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, a->data.f32, b->data.f32, (__half*)c->data.f16);
+				} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_32F) {
+					_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] * cdim[3] - z_start, 0xffff)), dim3(64, 8, 1), 0, stream>>>(z_start, astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, (__half*)a->data.f16, (__half*)b->data.f16, c->data.f32);
+				} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_16F) {
+					_ccv_nnc_cmul_kernel_4d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] * cdim[3] - z_start, 0xffff)), dim3(64, 8, 1), 0, stream>>>(z_start, astride[3], astride[2], astride[1], bstride[3], bstride[2], bstride[1], cstride[3], cstride[2], cstride[1], cdim[2], cdim[1], cdim[0] / 2, (__half*)a->data.f16, (__half*)b->data.f16, (__half*)c->data.f16);
+				}
 			}
 		} else if (nd == 3) {
-			if (a->info.datatype == CCV_32F && c->info.datatype == CCV_32F)
+			// Make sure when we launch, the grid.z won't exceed the limit which is 65535.
+			for (i = 0; i < (cdim[2] + 0xfffe) / 0xffff; i++)
 			{
-				_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2]), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, a->data.f32, b->data.f32, c->data.f32);
-			} else if (a->info.datatype == CCV_32F && c->info.datatype == CCV_16F) {
-				_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2]), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, a->data.f32, b->data.f32, (__half*)c->data.f16);
-			} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_32F) {
-				_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2]), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, (__half*)a->data.f16, (__half*)b->data.f16, c->data.f32);
-			} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_16F) {
-				_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, cdim[2]), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, (__half*)a->data.f16, (__half*)b->data.f16, (__half*)c->data.f16);
+				if (a->info.datatype == CCV_32F && c->info.datatype == CCV_32F)
+				{
+					_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] - i * 0xffff, 0xffff)), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, a->data.f32 + 0xffff * i * astride[2], b->data.f32 + 0xffff * i * bstride[2], c->data.f32 + 0xffff * i * cstride[2]);
+				} else if (a->info.datatype == CCV_32F && c->info.datatype == CCV_16F) {
+					_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] - i * 0xffff, 0xffff)), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, a->data.f32 + 0xffff * i * astride[2], b->data.f32 + 0xffff * i * bstride[2], (__half*)c->data.f16 + 0xffff * i * cstride[2]);
+				} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_32F) {
+					_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] - i * 0xffff, 0xffff)), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, (__half*)a->data.f16 + 0xffff * i * astride[2], (__half*)b->data.f16 + 0xffff * i * bstride[2], c->data.f32 + 0xffff * i * cstride[2]);
+				} else if (a->info.datatype == CCV_16F && c->info.datatype == CCV_16F) {
+					_ccv_nnc_cmul_kernel_3d_0<<<dim3((cdim[0] / 2 + 63) / 64, (cdim[1] + 7) / 8, ccv_min(cdim[2] - i * 0xffff, 0xffff)), dim3(64, 8, 1), 0, stream>>>(astride[2], astride[1], bstride[2], bstride[1], cstride[2], cstride[1], cdim[1], cdim[0] / 2, (__half*)a->data.f16 + 0xffff * i * astride[2], (__half*)b->data.f16 + 0xffff * i * bstride[2], (__half*)c->data.f16 + 0xffff * i * cstride[2]);
+				}
 			}
 		} else if (nd == 2) {
 			assert(adim[0] == bdim[0] && adim[0] == cdim[0]);

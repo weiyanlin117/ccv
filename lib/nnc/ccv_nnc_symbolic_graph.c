@@ -767,7 +767,7 @@ int ccv_nnc_tensor_symbol_alias_params(const ccv_nnc_symbolic_graph_t* const gra
 	return 0;
 }
 
-int ccv_nnc_tensor_symbol_set_flags(ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t tensor, const int flags)
+void ccv_nnc_tensor_symbol_set_flags(ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t tensor, const int flags)
 {
 	assert(graph == tensor.graph);
 	assert(tensor.d < graph->tensor_symbol_info->rnum);
@@ -779,7 +779,6 @@ int ccv_nnc_tensor_symbol_set_flags(ccv_nnc_symbolic_graph_t* const graph, const
 		ccv_nnc_tensor_symbol_info_t* const assign_info = (ccv_nnc_tensor_symbol_info_t*)ccv_array_get(graph->tensor_symbol_info, symbol_info->assign_ref - 1);
 		assign_info->flags = flags;
 	}
-	return 0;
 }
 
 int ccv_nnc_tensor_symbol_flags(ccv_nnc_symbolic_graph_t* const graph, const ccv_nnc_tensor_symbol_t tensor)

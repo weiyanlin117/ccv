@@ -8,10 +8,12 @@
 #include "ccv_nnc_mfa_depalettize.hpp"
 #include "ccv_nnc_mfa_adam.hpp"
 #include "ccv_nnc_mfa_cmul.hpp"
+#include "ccv_nnc_mfa_gelu.hpp"
 #include "ccv_nnc_mfa_gemm.hpp"
 #include "ccv_nnc_mfa_gemv.hpp"
 #include "ccv_nnc_mfa_cast.hpp"
 #include "ccv_nnc_mfa_add.hpp"
+#include "ccv_nnc_mfa_segmented_gemm.hpp"
 
 #ifdef __cplusplus
 #include "nnc/mfa/3rdparty/metal-cpp/Dispatch.hpp"
@@ -52,10 +54,7 @@ public:
   cache<normalization::hash, normalization::pipeline> normalization_cache;
   cache<depalettize::hash, depalettize::pipeline> depalettize_cache;
   cache<adam::hash, adam::pipeline> adam_cache;
-  cache<cmul::hash, cmul::pipeline> cmul_cache;
   cache<gemv::hash, gemv::pipeline> gemv_cache;
-  cache<cast::hash, cast::pipeline> cast_cache;
-  cache<add::hash, add::pipeline> add_cache;
 
   ShaderCache v2_cache;
   

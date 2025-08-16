@@ -9,9 +9,9 @@ class CodeWriter;
 
 struct GEMMKernel {
   NS::SharedPtr<MTL::Library> library;
-  
+
   std::string source;
-  
+
   /// A copy of the block dimensions from the descriptor.
   ///
   /// ## C++ Adaptation
@@ -38,6 +38,10 @@ struct GEMMKernel {
   bool preferAsyncStore;
 
   bool useBias;
+
+  bool loadM;
+
+  bool disableAsyncCopy;
 
   uint16_t registerM;
 

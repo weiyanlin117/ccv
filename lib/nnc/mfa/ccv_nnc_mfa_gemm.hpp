@@ -22,9 +22,6 @@ typedef struct {
 } ccv_nnc_mfa_gemm_params_t;
 
 #ifdef __cplusplus
-#include "nnc/mfa/3rdparty/metal-cpp/Dispatch.hpp"
-#include "nnc/mfa/3rdparty/metal-cpp/Metal.hpp"
-
 extern "C" {
 #endif // __cplusplus
 

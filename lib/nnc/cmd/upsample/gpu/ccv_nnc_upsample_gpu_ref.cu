@@ -214,8 +214,6 @@ static int _ccv_nnc_upsample_nearest_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc
 		const int hw = bdim[2] * bdim[3];
 		const float rheight = align_corners ? (float)(adim[2] - 1) / ccv_max(1, bdim[2] - 1) : (float)adim[2] / bdim[2];
 		const float rwidth = align_corners ? (float)(adim[3] - 1) / ccv_max(1, bdim[3] - 1) : (float)adim[3] / bdim[3];
-		assert(rheight <= 1);
-		assert(rwidth <= 1);
 		if (align_corners)
 		{
 			if (a->info.datatype == CCV_32F)
@@ -232,8 +230,6 @@ static int _ccv_nnc_upsample_nearest_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc
 		assert(a->info.format == CCV_TENSOR_FORMAT_NHWC || a->info.format == CCV_TENSOR_FORMAT_CHWN);
 		const float rheight = align_corners ? (float)(adim[1] - 1) / ccv_max(1, bdim[1] - 1) : (float)adim[1] / bdim[1];
 		const float rwidth = align_corners ? (float)(adim[2] - 1) / ccv_max(1, bdim[2] - 1) : (float)adim[2] / bdim[2];
-		assert(rheight <= 1);
-		assert(rwidth <= 1);
 		const int hw = bdim[1] * bdim[2];
 		if (align_corners)
 		{
@@ -381,12 +377,12 @@ __global__ void _ccv_nnc_upsample_bilinear_forw_nchw(const int hw, const float r
 		const NUM* ap = a;
 		NUM* bp = b;
 		const float xs = (xd + 0.5) * rwidth - 0.5;
-		const int xsi0 = (int)xs;
+		const int xsi0 = ccv_max((int)xs, 0);
 		const int xsi1 = ccv_min((int)(xs + 1), adim3 - 1);
 		const float xsc1 = xs - xsi0;
 		const float xsc0 = 1.0 - xsc1;
 		const float ys = (yd + 0.5) * rheight - 0.5;
-		const int ysi0 = (int)ys;
+		const int ysi0 = ccv_max((int)ys, 0);
 		const int ysi1 = ccv_min((int)(ys + 1), adim2 - 1);
 		const float ysc1 = ys - ysi0;
 		const float ysc0 = 1.0 - ysc1;
@@ -408,12 +404,12 @@ __global__ void _ccv_nnc_upsample_bilinear_forw_nhwc(const int hw, const float r
 		const NUM* ap = a;
 		NUM* bp = b;
 		const float xs = (xd + 0.5) * rwidth - 0.5;
-		const int xsi0 = (int)xs;
+		const int xsi0 = ccv_max((int)xs, 0);
 		const int xsi1 = ccv_min((int)(xs + 1), adim2 - 1);
 		const float xsc1 = xs - xsi0;
 		const float xsc0 = 1.0 - xsc1;
 		const float ys = (yd + 0.5) * rheight - 0.5;
-		const int ysi0 = (int)ys;
+		const int ysi0 = ccv_max((int)ys, 0);
 		const int ysi1 = ccv_min((int)(ys + 1), adim1 - 1);
 		const float ysc1 = ys - ysi0;
 		const float ysc0 = 1.0 - ysc1;
@@ -497,12 +493,12 @@ __global__ void _ccv_nnc_upsample_bilinear_back_nchw(const size_t tensor_count, 
 		NUM* const ap = a + idx * ainc2;
 		const NUM* const bp = b + idx * binc2;
 		const float xs = (xd + 0.5) * rwidth - 0.5;
-		const int xsi0 = (int)xs;
+		const int xsi0 = ccv_max((int)xs, 0);
 		const int xsi1 = ccv_min((int)(xs + 1), adim3 - 1);
 		const float xsc1 = xs - xsi0;
 		const float xsc0 = 1.0 - xsc1;
 		const float ys = (yd + 0.5) * rheight - 0.5;
-		const int ysi0 = (int)ys;
+		const int ysi0 = ccv_max((int)ys, 0);
 		const int ysi1 = ccv_min((int)(ys + 1), adim2 - 1);
 		const float ysc1 = ys - ysi0;
 		const float ysc0 = 1.0 - ysc1;
@@ -525,12 +521,12 @@ __global__ void _ccv_nnc_upsample_bilinear_back_nhwc(const size_t tensor_count, 
 		NUM* const ap = a + idx * ainc1;
 		const NUM* const bp = b + idx * binc1;
 		const float xs = (xd + 0.5) * rwidth - 0.5;
-		const int xsi0 = (int)xs;
+		const int xsi0 = ccv_max((int)xs, 0);
 		const int xsi1 = ccv_min((int)(xs + 1), adim2 - 1);
 		const float xsc1 = xs - xsi0;
 		const float xsc0 = 1.0 - xsc1;
 		const float ys = (yd + 0.5) * rheight - 0.5;
-		const int ysi0 = (int)ys;
+		const int ysi0 = ccv_max((int)ys, 0);
 		const int ysi1 = ccv_min((int)(ys + 1), adim1 - 1);
 		const float ysc1 = ys - ysi0;
 		const float ysc0 = 1.0 - ysc1;
@@ -574,8 +570,6 @@ static int _ccv_nnc_upsample_bilinear_forw(const ccv_nnc_cmd_t cmd, const ccv_nn
 		const int hw = bdim[2] * bdim[3];
 		const float rheight = align_corners ? (float)(adim[2] - 1) / ccv_max(1, bdim[2] - 1) : (float)adim[2] / bdim[2];
 		const float rwidth = align_corners ? (float)(adim[3] - 1) / ccv_max(1, bdim[3] - 1) : (float)adim[3] / bdim[3];
-		assert(rheight <= 1);
-		assert(rwidth <= 1);
 		if (align_corners)
 		{
 			if (a->info.datatype == CCV_32F)
@@ -592,8 +586,6 @@ static int _ccv_nnc_upsample_bilinear_forw(const ccv_nnc_cmd_t cmd, const ccv_nn
 		assert(a->info.format == CCV_TENSOR_FORMAT_NHWC || a->info.format == CCV_TENSOR_FORMAT_CHWN);
 		const float rheight = align_corners ? (float)(adim[1] - 1) / ccv_max(1, bdim[1] - 1) : (float)adim[1] / bdim[1];
 		const float rwidth = align_corners ? (float)(adim[2] - 1) / ccv_max(1, bdim[2] - 1) : (float)adim[2] / bdim[2];
-		assert(rheight <= 1);
-		assert(rwidth <= 1);
 		const int hw = bdim[1] * bdim[2];
 		if (align_corners)
 		{
