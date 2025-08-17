@@ -1,20 +1,16 @@
-extern "C" {
-#include <ccv.h>
-#include <ccv_internal.h>
-#include <nnc/ccv_nnc.h>
-#include <nnc/ccv_nnc_easy.h>
-#include <nnc/ccv_nnc_internal.h>
-}
-#include <nnc/gpu/ccv_nnc_compat.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <cassert>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <algorithm>
 
 #include "sage_attn_utils.cuh"
 #include "math.cuh"
 #include "qattn/attn_utils.cuh"
 #include "qattn/qk_int_sv_f16_cuda_sm80_kernel_only.cuh"
 #include "fused.h"
-
-#include <cuda_fp16.h>
-#include <algorithm>
 
 extern "C" void ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct(
     int8_t *Q, int8_t *K, half *V, half *O,

@@ -371,10 +371,13 @@ cuda_library(
 	name = "nnc_cuda_compat_sm80",
 	srcs = glob([
 		"nnc/gpu/3rdparty/flash_attn/**/*.cu",
+		"nnc/gpu/3rdparty/sage_attn/**/*.cu",
 	]),
 	hdrs = glob([
 		"nnc/gpu/3rdparty/flash_attn/**/*.h",
 		"nnc/gpu/3rdparty/flash_attn/**/*.cuh",
+		"nnc/gpu/3rdparty/sage_attn/**/*.h",
+		"nnc/gpu/3rdparty/sage_attn/**/*.cuh",
 	]),
 	copts = ccv_default_copts() + ["-nvcc_options", "expt-relaxed-constexpr"],
 	deps = [
