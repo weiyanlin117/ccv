@@ -1,10 +1,16 @@
 #include "case.h"
+#ifdef HAVE_CUDA
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#endif
 #include "ccv_case.h"
 #include "ccv_nnc_case.h"
 #include <ccv.h>
 #include <nnc/ccv_nnc.h>
 #include <nnc/ccv_nnc_easy.h>
 #include <3rdparty/dsfmt/dSFMT.h>
+#include <time.h>
+#include "nnc/ccv_nnc_internal.h"
 
 TEST_SETUP()
 {
@@ -4199,6 +4205,394 @@ TEST_CASE("segmented gemm, reuse")
 	ccv_nnc_tensor_free(hw);
 	ccv_nnc_tensor_free(hb);
 	ccv_nnc_tensor_free(bt);
+}
+
+TEST_CASE("direct sage vs flash attention NHD performance test")
+{
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+	
+	printf("\n=== Direct SageAttention NHD Performance Test ===\n");
+	printf("Testing performance with memory reuse across 1000 runs\n");
+	
+	// Test configurations based on sage_attn test case
+	int num_trials = 6;
+	int B_candidates[6] = {  32,   12, 16, 1, 2, 1 };
+	int R_candidates[6] = { 160,  256, 128, 77, 77, 5 };
+	int C_candidates[6] = { 128,  128, 128, 128, 128, 5 };
+	int Hq_candidates[6] = {   8,  8, 8, 8, 8, 32 };
+	int Hk_candidates[6] = {   8,  8, 8, 8, 2, 8 };
+	int D_candidates[6] = {  64, 128, 128, 64, 64, 128 };
+	int is_causal_candidates[6] = {  0, 0, 0, 0, 0, 0 };
+	
+	double trial_times[6];
+	
+	for (int trial = 0; trial < num_trials; ++trial) {
+		int B = B_candidates[trial];
+		int R = R_candidates[trial];
+		int C = C_candidates[trial];
+		int Hq = Hq_candidates[trial];
+		int Hk = Hk_candidates[trial];
+		int D = D_candidates[trial];
+		int is_causal = is_causal_candidates[trial];
+		float scale = 1.0 / sqrt((float)D);
+
+		printf("\n[Trial %d] Config: B=%d, R=%d, C=%d, Hq=%d, Hk=%d, D=%d, causal=%d\n", 
+			trial, B, R, C, Hq, Hk, D, is_causal);
+		  // Main operations:
+  // 1. Q @ K^T: [B, R, Hq, D] @ [B, D, Hk, C] -> [B, R, Hq, C]
+  //    FLOPs = B * Hq * R * C * D * 2  (multiply-add operations)
+  // 2. Softmax: B * Hq * R * C operations
+  // 3. Result @ V: [B, R, Hq, C] @ [B, C, Hk, D] -> [B, R, Hq, D] 
+  //    FLOPs = B * Hq * R * C * D * 2
+
+
+		int total_Flops = B * Hq * R * C * D * 4;
+		printf("Full tensor comparison (%d total_Flops):\n", total_Flops);
+		// Generate test data programmatically
+		ccv_nnc_tensor_t* const q_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const k_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const v_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, C, Hk, D), 0);
+
+		// Initialize with realistic data ranges for SageAttention quantization
+		for (int i = 0; i < B * R * Hq * D; ++i) {
+			q_tensor->data.f32[i] = (float)(i) / (float)(B * R * Hq * D);
+		}
+		for (int i = 0; i < B * C * Hk * D; ++i) {
+			k_tensor->data.f32[i] = (float)(i) / (float)(B * C * Hk * D);
+		}
+		for (int i = 0; i < B * C * Hk * D; ++i) {
+			v_tensor->data.f32[i] = (float)(i) / (float)(B * C * Hk * D);
+		}
+
+		// Convert to FP16
+		ccv_nnc_tensor_t* const q_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const k_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const v_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, C, Hk, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor, k_tensor, v_tensor), TENSOR_LIST(q_tensor_f16, k_tensor_f16, v_tensor_f16), 0);
+
+		// Allocate GPU tensors (reused across all runs)
+		ccv_nnc_tensor_t* const gpu_q_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const gpu_k_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const gpu_v_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const gpu_o_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, Hq, D), 0);
+		
+		// Transfer data to GPU once
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor_f16, k_tensor_f16, v_tensor_f16), TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor), 0);
+
+#ifdef HAVE_CUDA_SM80
+		// Create quantized output tensors for the direct function
+		const uint32_t BLKQ = 128;
+		const uint32_t WARPQ = 32;
+		const uint32_t BLKK = 64;
+		const size_t q_blocks = (R + BLKQ - 1) / BLKQ;  // Use sequence length R for NHD
+		const size_t warps_per_block = BLKQ / WARPQ;
+		const int q_scale_blocks = q_blocks * warps_per_block;  // Should be 4
+		const int k_scale_blocks = (C + BLKK - 1) / BLKK;      // Should be 1
+
+		ccv_nnc_tensor_t* gpu_q_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* gpu_k_int8_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* gpu_q_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, Hq, q_scale_blocks), 0);
+		ccv_nnc_tensor_t* gpu_k_scale_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, B, Hk, k_scale_blocks), 0);
+
+		// Declare the direct function
+		extern void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
+			__fp16 *query, __fp16 *key, __fp16 *k_mean, __fp16 *value,
+			int8_t *q_int8, int8_t *k_int8,
+			float *query_scale, float *key_scale, __fp16 *output,
+			int qdim[], int kdim[], int vdim[], int odim[],
+			int q_int8_dim[], int k_int8_dim[],
+			int query_scale_dim[], int key_scale_dim[],
+			int qstride[], int kstride[], int vstride[], int ostride[],
+			int q_int8_stride[], int k_int8_stride[],
+			int query_scale_stride[], int key_scale_stride[],
+			int tensor_layout, int is_causal, int qk_quant_gran,
+			float sm_scale, int return_lse, int pv_accum_dtype,
+			int BLKQ, int WARPQ, int BLKK,
+			int km_dim[], int km_stride[], cudaStream_t cuda_stream);
+
+		// Prepare dimension and stride arrays (NHD layout: tensor_layout=0)
+		int qdim[] = {B, R, Hq, D};      // NHD format
+		int kdim[] = {B, C, Hk, D};
+		int vdim[] = {B, C, Hk, D};
+		int odim[] = {B, R, Hq, D};
+		int q_int8_dim[] = {B, R, Hq, D};
+		int k_int8_dim[] = {B, C, Hk, D};
+		int query_scale_dim[] = {B, Hq, q_scale_blocks};
+		int key_scale_dim[] = {B, Hk, k_scale_blocks};
+		int km_dim[] = {B, Hq, D};
+
+		// Calculate strides for NHD layout: [B, S, H, D]
+		int qstride[] = {R * Hq * D, Hq * D, D, 1};
+		int kstride[] = {C * Hk * D, Hk * D, D, 1};
+		int vstride[] = {C * Hk * D, Hk * D, D, 1};
+		int ostride[] = {R * Hq * D, Hq * D, D, 1};
+		int q_int8_stride[] = {R * Hq * D, Hq * D, D, 1};
+		int k_int8_stride[] = {C * Hk * D, Hk * D, D, 1};
+		int query_scale_stride[] = {1, Hq * q_scale_blocks, q_scale_blocks, 1};
+		int key_scale_stride[] = {1, Hk * k_scale_blocks, k_scale_blocks, 1};
+		int km_stride[] = {Hq * D, D, 1};
+
+		// Warm up runs
+		int warmup_runs = 10;
+		for (int i = 0; i < warmup_runs; i++) {
+			ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
+				(__fp16*)gpu_q_tensor->data.f16,      // query
+				(__fp16*)gpu_k_tensor->data.f16,      // key
+				NULL,                                 // k_mean (not using mean subtraction)
+				(__fp16*)gpu_v_tensor->data.f16,      // value
+				(int8_t*)gpu_q_int8_tensor->data.u8,  // q_int8
+				(int8_t*)gpu_k_int8_tensor->data.u8,  // k_int8
+				(float*)gpu_q_scale_tensor->data.f32,  // query_scale
+				(float*)gpu_k_scale_tensor->data.f32,  // key_scale
+				(__fp16*)gpu_o_tensor->data.f16,      // output
+				qdim, kdim, vdim, odim,
+				q_int8_dim, k_int8_dim,
+				query_scale_dim, key_scale_dim,
+				qstride, kstride, vstride, ostride,
+				q_int8_stride, k_int8_stride,
+				query_scale_stride, key_scale_stride,
+				0,                   // tensor_layout: 0=NHD
+				is_causal,           // is_causal
+				2,                   // qk_quant_gran: 2=per_warp
+				scale,               // sm_scale
+				0,                   // return_lse: false
+				1,                   // pv_accum_dtype: 2=FP32
+				BLKQ,                // BLKQ
+				WARPQ,               // WARPQ
+				BLKK,                // BLKK
+				km_dim, km_stride,   // k_mean dimensions and strides
+				0                    // cuda_stream (default)
+			);
+		}
+		cudaDeviceSynchronize();
+		
+		// Performance measurement with memory reuse
+		int num_runs = 10000;
+		struct timespec start_time, end_time;
+		clock_gettime(CLOCK_MONOTONIC, &start_time);
+		
+		for (int i = 0; i < num_runs; i++) {
+			ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
+				(__fp16*)gpu_q_tensor->data.f16,      // query
+				(__fp16*)gpu_k_tensor->data.f16,      // key
+				NULL,                                 // k_mean (not using mean subtraction)
+				(__fp16*)gpu_v_tensor->data.f16,      // value
+				(int8_t*)gpu_q_int8_tensor->data.u8,  // q_int8
+				(int8_t*)gpu_k_int8_tensor->data.u8,  // k_int8
+				(float*)gpu_q_scale_tensor->data.f32,  // query_scale
+				(float*)gpu_k_scale_tensor->data.f32,  // key_scale
+				(__fp16*)gpu_o_tensor->data.f16,      // output
+				qdim, kdim, vdim, odim,
+				q_int8_dim, k_int8_dim,
+				query_scale_dim, key_scale_dim,
+				qstride, kstride, vstride, ostride,
+				q_int8_stride, k_int8_stride,
+				query_scale_stride, key_scale_stride,
+				0,                   // tensor_layout: 0=NHD
+				is_causal,           // is_causal
+				2,                   // qk_quant_gran: 2=per_warp
+				scale,               // sm_scale
+				0,                   // return_lse: false
+				1,                   // pv_accum_dtype: 2=FP32
+				BLKQ,                // BLKQ
+				WARPQ,               // WARPQ
+				BLKK,                // BLKK
+				km_dim, km_stride,   // k_mean dimensions and strides
+				0                    // cuda_stream (default)
+			);
+		}
+		
+		// Wait for GPU to complete all runs
+		cudaDeviceSynchronize();
+		clock_gettime(CLOCK_MONOTONIC, &end_time);
+		
+		// Cleanup additional tensors
+		ccv_nnc_tensor_free(gpu_q_int8_tensor);
+		ccv_nnc_tensor_free(gpu_k_int8_tensor);
+		ccv_nnc_tensor_free(gpu_q_scale_tensor);
+		ccv_nnc_tensor_free(gpu_k_scale_tensor);
+#else
+		printf("CUDA SM80 not available, skipping direct function call\n");
+		return;
+#endif
+		
+		// Calculate average elapsed time in milliseconds
+		double total_elapsed_ms = ((end_time.tv_sec - start_time.tv_sec) * 1000.0) + 
+		                          ((end_time.tv_nsec - start_time.tv_nsec) / 1000000.0);
+		double elapsed_ms = total_elapsed_ms / num_runs;
+		trial_times[trial] = elapsed_ms;
+		
+		printf("GPU Execution Time: %.4f ms (average of %d runs with memory reuse)\n", elapsed_ms, num_runs);
+		
+		// Cleanup
+		ccv_nnc_tensor_free(q_tensor);
+		ccv_nnc_tensor_free(k_tensor);
+		ccv_nnc_tensor_free(v_tensor);
+		ccv_nnc_tensor_free(q_tensor_f16);
+		ccv_nnc_tensor_free(k_tensor_f16);
+		ccv_nnc_tensor_free(v_tensor_f16);
+		ccv_nnc_tensor_free(gpu_q_tensor);
+		ccv_nnc_tensor_free(gpu_k_tensor);
+		ccv_nnc_tensor_free(gpu_v_tensor);
+		ccv_nnc_tensor_free(gpu_o_tensor);
+	}
+	
+	// Print performance summary
+	printf("\n=== Direct SageAttention NHD Performance Summary ===\n");
+	printf("Individual trial times (ms):\n");
+	for (int i = 0; i < num_trials; i++) {
+		printf("  Trial %d: %.4f ms\n", i, trial_times[i]);
+	}
+	
+	// Find min and max times
+	double min_time = trial_times[0], max_time = trial_times[0];
+	int min_idx = 0, max_idx = 0;
+	for (int i = 1; i < num_trials; i++) {
+		if (trial_times[i] < min_time) {
+			min_time = trial_times[i];
+			min_idx = i;
+		}
+		if (trial_times[i] > max_time) {
+			max_time = trial_times[i];
+			max_idx = i;
+		}
+	}
+	printf("Fastest trial: %d (%.4f ms)\n", min_idx, min_time);
+	printf("Slowest trial: %d (%.4f ms)\n", max_idx, max_time);
+	printf("====================================================\n");
+
+	GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+	// Bypass error: variable-sized object may not be initialized
+#define num_long_trials 4
+#define num_short_trials 2
+#define num_trials (num_long_trials + num_short_trials)
+
+	double trial_flash_times[num_trials];
+
+	for (int trial = 0; trial < num_trials; ++trial) {
+		int B_candidates[num_trials] = {  32,   12, 16, 1, 2, 1 };
+		int R_candidates[num_trials] = { 160,  256, 128, 77, 77, 5 };
+		int C_candidates[num_trials] = { 128,  128, 128, 128, 128, 5 };
+		int Hq_candidates[num_trials] = {   8,  8, 8, 8, 8, 32 };
+		int Hk_candidates[num_trials] = {   8,  8, 8, 8, 2, 8 };
+		int D_candidates[num_trials] = {  64, 128, 128, 64, 64, 128 };  // Changed to only use supported dimensions
+		int is_causal_candidates[num_trials] = {  0, 0, 0, 0, 0, 0 };
+		
+		int B = B_candidates[trial];
+		int R = R_candidates[trial];
+		int C = C_candidates[trial];
+		int Hq = Hq_candidates[trial];
+		int Hk = Hk_candidates[trial];
+		int D = D_candidates[trial];
+		int is_causal = is_causal_candidates[trial];
+		float scale = 1.0 / sqrt((float)D);
+		printf("\n[Trial %d] Config: B=%d, R=%d, C=%d, Hq=%d, Hk=%d, D=%d, causal=%d\n", 
+			trial, B, R, C, Hq, Hk, D, is_causal);
+		int total_flops = B * Hq * R * C * D * 4;
+		printf("Full tensor comparison (%d total_flops):\n", total_flops);
+		GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+		ccv_nnc_tensor_t* const q_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const k_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const v_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, C, Hk, D), 0);
+
+		for (int i = 0; i < B * R * Hq * D; ++i) {
+			q_tensor->data.f32[i] = (float)(i) / (float)(B * R * Hq * D);
+		}
+		for (int i = 0; i < B * C * Hk * D; ++i) {
+			k_tensor->data.f32[i] = (float)(i) / (float)(B * C * Hk * D);
+		}
+		for (int i = 0; i < B * C * Hk * D; ++i) {
+			v_tensor->data.f32[i] = (float)(i) / (float)(B * C * Hk * D);
+		}
+
+		ccv_nnc_tensor_t* const o_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, Hq, D), 0);
+		ccv_nnc_cmd_exec(CMD_SCALED_DOT_PRODUCT_ATTENTION_FORWARD(scale, is_causal), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor, k_tensor, v_tensor, NULL, NULL, NULL), TENSOR_LIST(o_tensor, NULL), 0);
+		ccv_nnc_tensor_t* const q_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const k_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const v_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, C, Hk, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor, k_tensor, v_tensor), TENSOR_LIST(q_tensor_f16, k_tensor_f16, v_tensor_f16), 0);
+
+		// Why it there 000 in the beginning of the argument list for GPU_TENSOR_NHWC?
+		ccv_nnc_tensor_t* const gpu_q_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, Hq, D), 0);
+		ccv_nnc_tensor_t* const gpu_k_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const gpu_v_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, C, Hk, D), 0);
+		ccv_nnc_tensor_t* const gpu_o_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, R, Hq, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(q_tensor_f16, k_tensor_f16, v_tensor_f16), TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor), 0);
+
+		// Warm up runs
+		int warmup_runs = 10;
+		for (int i = 0; i < warmup_runs; i++) {
+			ccv_nnc_cmd_exec(CMD_SCALED_DOT_PRODUCT_ATTENTION_FORWARD(scale, is_causal), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor, NULL, NULL, NULL), TENSOR_LIST(gpu_o_tensor, NULL), 0);
+		}
+		ccv_nnc_stream_context_wait(0);
+		
+		// Time the GPU attention execution with multiple runs
+		int num_runs = 10000;
+		struct timespec start_time, end_time;
+		clock_gettime(CLOCK_MONOTONIC, &start_time);
+		
+		for (int i = 0; i < num_runs; i++) {
+			ccv_nnc_cmd_exec(CMD_SCALED_DOT_PRODUCT_ATTENTION_FORWARD(scale, is_causal), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_q_tensor, gpu_k_tensor, gpu_v_tensor, NULL, NULL, NULL), TENSOR_LIST(gpu_o_tensor, NULL), 0);
+		}
+		
+		// Wait for GPU to complete all runs
+		ccv_nnc_stream_context_wait(0);
+		clock_gettime(CLOCK_MONOTONIC, &end_time);
+		
+		// Calculate average elapsed time in milliseconds
+		double total_elapsed_ms = ((end_time.tv_sec - start_time.tv_sec) * 1000.0) + 
+		                          ((end_time.tv_nsec - start_time.tv_nsec) / 1000000.0);
+		double elapsed_ms = total_elapsed_ms / num_runs;
+		trial_flash_times[trial] = elapsed_ms;
+		printf("GPU Execution Time: %.4f ms (average of %d runs with memory reuse)\n", elapsed_ms, num_runs);
+
+		ccv_nnc_tensor_t* const copy_of_gpu_o_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, R, Hq, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(gpu_o_tensor), TENSOR_LIST(copy_of_gpu_o_tensor_f16), 0);
+		ccv_nnc_tensor_t* const copy_of_gpu_o_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, R, Hq, D), 0);
+		ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, TENSOR_LIST(copy_of_gpu_o_tensor_f16), TENSOR_LIST(copy_of_gpu_o_tensor), 0);
+	
+		ccv_nnc_tensor_free(o_tensor);
+		ccv_nnc_tensor_free(gpu_o_tensor);
+		ccv_nnc_tensor_free(copy_of_gpu_o_tensor);
+		ccv_nnc_tensor_free(copy_of_gpu_o_tensor_f16);
+		ccv_nnc_tensor_free(q_tensor);
+		ccv_nnc_tensor_free(k_tensor);
+		ccv_nnc_tensor_free(v_tensor);
+		ccv_nnc_tensor_free(q_tensor_f16);
+		ccv_nnc_tensor_free(k_tensor_f16);
+		ccv_nnc_tensor_free(v_tensor_f16);
+		ccv_nnc_tensor_free(gpu_q_tensor);
+		ccv_nnc_tensor_free(gpu_k_tensor);
+		ccv_nnc_tensor_free(gpu_v_tensor);
+	}
+	
+	// Print performance summary
+	printf("\n=== FlashAttention Performance Summary ===\n");
+	printf("Individual trial times (ms):\n");
+	for (int i = 0; i < num_trials; i++) {
+		printf("  Trial %d: %.4f ms\n", i, trial_flash_times[i]);
+	}
+	
+	// Find min and max times
+	min_time = trial_flash_times[0], max_time = trial_flash_times[0];
+	min_idx = 0, max_idx = 0;
+	for (int i = 1; i < num_trials; i++) {
+		if (trial_flash_times[i] < min_time) {
+			min_time = trial_flash_times[i];
+			min_idx = i;
+		}
+		if (trial_flash_times[i] > max_time) {
+			max_time = trial_flash_times[i];
+			max_idx = i;
+		}
+	}
+	printf("Fastest trial: %d (%.4f ms)\n", min_idx, min_time);
+	printf("Slowest trial: %d (%.4f ms)\n", max_idx, max_time);
+	printf("====================================================\n");
+
+#undef num_long_trials
+#undef num_short_trials
+#undef num_trials
 }
 
 #include "case_main.h"
