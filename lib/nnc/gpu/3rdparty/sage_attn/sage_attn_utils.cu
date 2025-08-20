@@ -725,11 +725,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
         cuda_stream                   // CUDA stream
     );
         
-    // Copy quantized data back to CPU for inspection
-    int total_elements = qdim[0] * qdim[1] * qdim[2] * qdim[3];
-    int8_t* temp_q_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
-    int8_t* temp_k_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
-        
     // Step 2: Perform quantized attention computation
     if (pv_accum_dtype == 2) { // DTYPE_FP32
         ccv_nnc_qk_int8_sv_f16_accum_f32_attn_direct(

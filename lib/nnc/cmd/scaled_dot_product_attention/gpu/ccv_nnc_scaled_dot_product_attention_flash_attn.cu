@@ -128,7 +128,7 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 		// Default to FP32 accumulation to match PyTorch SageAttention behavior
 		pv_accum_dtype = DTYPE_FP16_MIX_FP32;
 	}
-	printf("pv_accum_dtype: %d", pv_accum_dtype);
+	// printf("pv_accum_dtype: %d", pv_accum_dtype);
 
 	int WARPQ;    
 	// Use the same logic as PyTorch SageAttention
@@ -146,48 +146,57 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	const int q_scale_blocks = q_blocks * warps_per_block;
 	const int k_scale_blocks = (C + BLKK - 1) / BLKK;
 	
-	printf("DEBUG: R=%d, BLKQ=%d, WARPQ=%d\n", R, BLKQ, WARPQ);
-	printf("DEBUG: q_blocks=%zu, warps_per_block=%zu, q_scale_blocks=%d\n", 
-	       q_blocks, warps_per_block, q_scale_blocks);
-	printf("DEBUG: C=%d, BLKK=%d, k_scale_blocks=%d\n", C, BLKK, k_scale_blocks);
+	// printf("DEBUG: R=%d, BLKQ=%d, WARPQ=%d\n", R, BLKQ, WARPQ);
+	// printf("DEBUG: q_blocks=%zu, warps_per_block=%zu, q_scale_blocks=%d\n", 
+	//        q_blocks, warps_per_block, q_scale_blocks);
+	// printf("DEBUG: C=%d, BLKK=%d, k_scale_blocks=%d\n", C, BLKK, k_scale_blocks);
 	
 	// Calculate sizes for all workspace allocations (will allocate later after reduce)
 	size_t q_int8_size = sizeof(int8_t) * batch_size * R * Hq * D;
 	size_t k_int8_size = sizeof(int8_t) * batch_size * C * Hk * D;
 	size_t q_scale_size = sizeof(float) * batch_size * Hq * q_scale_blocks;
 	size_t k_scale_size = sizeof(float) * batch_size * Hk * k_scale_blocks;
+	size_t k_mean_size = sizeof(half) * batch_size * 1 * Hk * D;  // FP16 data size for k_mean tensor
 	
-	// Keep k_mean tensors as regular allocations for now since they're used in reduce operation
-	ccv_nnc_tensor_t* k_mean_tensor_4d = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, batch_size, 1, Hk, D), 0);
-	ccv_nnc_tensor_t* k_mean_tensor_3d = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, batch_size, Hk, D), 0);
+	// Set k_mean dimensions and strides manually for workspace tensor
+	int km_dim[CCV_NNC_MAX_DIM_ALLOC];
+	km_dim[0] = batch_size;
+	km_dim[1] = 1;
+	km_dim[2] = Hk;
+	km_dim[3] = D;
 	
-	// Create reference tensors to compare dimensions and strides
-	ccv_nnc_tensor_t* k_int8_tensor_ref = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 8U, batch_size, C, Hk, D), 0);
-	ccv_nnc_tensor_t* q_scale_tensor_ref = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hq, q_scale_blocks), 0);
-	ccv_nnc_tensor_t* k_scale_tensor_ref = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 32F, batch_size, Hk, k_scale_blocks), 0);
-
-	int reduce_axis = 1; // NHD(BNHD) N is 1, HND(BHND) N is 2 
-	ccv_nnc_cmd_param_t reduce_params = {
-		.size = {.dim = {1, 1, 1}},
-		.reduce = {.axis = {reduce_axis}, .count = 1}
-	};
-	ccv_nnc_cmd_t reduce_cmd = ccv_nnc_cmd(CCV_NNC_REDUCE_MEAN_FORWARD, 0, reduce_params, 0);
-	ccv_nnc_tensor_t* reduce_inputs[] = {(ccv_nnc_tensor_t*)k};
-	ccv_nnc_tensor_t* reduce_outputs[] = {k_mean_tensor_4d};
-	ccv_nnc_cmd_exec(reduce_cmd, ccv_nnc_no_hint, 0,
-					reduce_inputs, 1, reduce_outputs, 1, stream_context);
+	int km_stride[CCV_NNC_MAX_DIM_ALLOC];
+	km_stride[3] = 1;           // dim stride
+	km_stride[2] = D;           // head stride  
+	km_stride[1] = Hk * D;      // seq stride (should be same as head since seq=1)
+	km_stride[0] = Hk * D;      // batch stride
 	
-	// Check for CUDA errors after reduce operation
-	cudaError_t reduce_error = cudaGetLastError();
-	if (reduce_error != cudaSuccess) {
-		printf("ERROR after reduce_mean operation: %s\n", cudaGetErrorString(reduce_error));
-	}
+	// // Setup CuDNN reduce mean operation BEFORE allocating workspace
+	// cudnnHandle_t cudnn = ccv_nnc_stream_context_get_cudnn(stream_context);
 	
-	// NOW allocate workspace for ALL tensors AFTER the reduce operation
-	size_t total_workspace_size = q_int8_size + k_int8_size + q_scale_size + k_scale_size;
-	printf("DEBUG: Requesting total workspace of size %zu bytes\n", total_workspace_size);
-	printf("DEBUG: Breakdown: q_int8=%zu, k_int8=%zu, q_scale=%zu, k_scale=%zu\n", 
-	       q_int8_size, k_int8_size, q_scale_size, k_scale_size);
+	// // Create tensor descriptors for k and k_mean
+	// ccv_nnc_tensor_view_t k_view = ccv_nnc_get_tensor_view((ccv_nnc_tensor_t*)k);
+	// const ccv_nnc_cudnn_tensor_view_descriptor_t k_desc = ccv_nnc_cudnn_get_tensor_view_descriptor_for_op(stream_context, &k_view);
+	
+	// // Create k_mean tensor descriptor manually - dimensions: [batch_size, 1, Hk, D]
+	// cudnnTensorDescriptor_t k_mean_desc;
+	// cudnnCreateTensorDescriptor(&k_mean_desc);
+	// cudnnSetTensorNdDescriptor(k_mean_desc, CUDNN_DATA_HALF, 4, km_dim, km_stride);
+	
+	// // Setup CuDNN reduce mean operation
+	// cudnnReduceTensorDescriptor_t reduce_mean;
+	// cudnnCreateReduceTensorDescriptor(&reduce_mean);
+	// cudnnSetReduceTensorDescriptor(reduce_mean, CUDNN_REDUCE_TENSOR_AVG, CUDNN_DATA_FLOAT, CUDNN_PROPAGATE_NAN, CUDNN_REDUCE_TENSOR_NO_INDICES, CUDNN_32BIT_INDICES);
+	
+	// // Get workspace size for reduction operation
+	size_t reduce_workspace_size = 0;
+	// CUDNN_ENFORCE(cudnnGetReductionWorkspaceSize(cudnn, reduce_mean, k_desc.descriptor, k_mean_desc, &reduce_workspace_size));
+	
+	// Allocate COMBINED workspace for ALL tensors including k_mean AND reduce operation
+	size_t total_workspace_size = q_int8_size + k_int8_size + q_scale_size + k_scale_size + k_mean_size + reduce_workspace_size;
+	// printf("DEBUG: Requesting total workspace of size %zu bytes (reduce_workspace_size=%zu)\n", total_workspace_size, reduce_workspace_size);
+	// printf("DEBUG: Breakdown: q_int8=%zu, k_int8=%zu, q_scale=%zu, k_scale=%zu, k_mean=%zu\n", 
+	//        q_int8_size, k_int8_size, q_scale_size, k_scale_size, k_mean_size);
 	
 	unsigned char* workspace = (unsigned char*)ccv_nnc_stream_context_get_workspace(stream_context, total_workspace_size, CCV_TENSOR_GPU_MEMORY);
 	
@@ -196,24 +205,14 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	int8_t* k_int8_workspace = (int8_t*)(workspace + q_int8_size);
 	float* q_scale_workspace = (float*)(workspace + q_int8_size + k_int8_size);
 	float* k_scale_workspace = (float*)(workspace + q_int8_size + k_int8_size + q_scale_size);
+	half* k_mean_workspace = (half*)(workspace + q_int8_size + k_int8_size + q_scale_size + k_scale_size);
+	// void* reduce_workspace = (reduce_workspace_size > 0) ? (workspace + q_int8_size + k_int8_size + q_scale_size + k_scale_size + k_mean_size) : NULL;
 	
-	printf("DEBUG: Workspace pointers - q_int8: %p, k_int8: %p, q_scale: %p, k_scale: %p\n",
-	       q_int8_workspace, k_int8_workspace, q_scale_workspace, k_scale_workspace);
-	
-	// Check for CUDA errors after workspace allocation
-	cudaError_t alloc_error = cudaGetLastError();
-	if (alloc_error != cudaSuccess) {
-		printf("ERROR after workspace allocation: %s\n", cudaGetErrorString(alloc_error));
-	}
-	
-	// ccv_nnc_tensor_t* reshape_inputs[] = {k_mean_tensor_4d};
-	// ccv_nnc_tensor_t* reshape_outputs[] = {k_mean_tensor_3d};
-
-	// ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0,
-	// 				reshape_inputs, 1, reshape_outputs, 1, 0);
-
-	// Use k_mean tensor view (it's still a regular tensor)
-	ccv_nnc_tensor_view_t* k_mean = (ccv_nnc_tensor_view_t*)k_mean_tensor_4d;
+	// // Perform the reduce mean operation
+	// static const float one = 1.0f, zero = 0.0f;
+	// CUDNN_ENFORCE(cudnnReduceTensor(cudnn, reduce_mean, 0, 0, reduce_workspace, reduce_workspace_size, 
+	//                                &one, k_desc.descriptor, k_desc.data.u8, 
+	//                                &zero, k_mean_desc, k_mean_workspace));
 
 	// Call SageAttention with proper parameters
 	// tensor_layout: 0 for NHD (batch, seq, heads, dim), 1 for HND (batch, heads, seq, dim)
@@ -222,29 +221,6 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	const int qk_quant_gran = 2; // per_warp quantization
 	const float sm_scale = 1.0f / sqrtf((float)D); // scale = 1.0 / sqrt(head_dim)
 	const int return_lse = 0;
-
-	// Get reference tensor dimensions and strides for comparison
-	int k_int8_dim_ref[CCV_NNC_MAX_DIM_ALLOC];
-	int q_scale_dim_ref[CCV_NNC_MAX_DIM_ALLOC];
-	int k_scale_dim_ref[CCV_NNC_MAX_DIM_ALLOC];
-	int k_int8_stride_ref[CCV_NNC_MAX_DIM_ALLOC];
-	int q_scale_stride_ref[CCV_NNC_MAX_DIM_ALLOC];
-	int k_scale_stride_ref[CCV_NNC_MAX_DIM_ALLOC];
-	
-	ccv_nnc_tensor_view_get_dim((ccv_nnc_tensor_view_t*)k_int8_tensor_ref, k_int8_dim_ref);
-	ccv_nnc_tensor_view_get_dim((ccv_nnc_tensor_view_t*)q_scale_tensor_ref, q_scale_dim_ref);
-	ccv_nnc_tensor_view_get_dim((ccv_nnc_tensor_view_t*)k_scale_tensor_ref, k_scale_dim_ref);
-	ccv_nnc_tensor_view_get_stride((ccv_nnc_tensor_view_t*)k_int8_tensor_ref, k_int8_stride_ref);
-	ccv_nnc_tensor_view_get_stride((ccv_nnc_tensor_view_t*)q_scale_tensor_ref, q_scale_stride_ref);
-	ccv_nnc_tensor_view_get_stride((ccv_nnc_tensor_view_t*)k_scale_tensor_ref, k_scale_stride_ref);
-	
-	printf("DEBUG: Reference tensor dimensions and strides:\n");
-	printf("  k_int8_dim_ref: [%d, %d, %d, %d]\n", k_int8_dim_ref[0], k_int8_dim_ref[1], k_int8_dim_ref[2], k_int8_dim_ref[3]);
-	printf("  q_scale_dim_ref: [%d, %d, %d, %d]\n", q_scale_dim_ref[0], q_scale_dim_ref[1], q_scale_dim_ref[2], q_scale_dim_ref[3]);
-	printf("  k_scale_dim_ref: [%d, %d, %d, %d]\n", k_scale_dim_ref[0], k_scale_dim_ref[1], k_scale_dim_ref[2], k_scale_dim_ref[3]);
-	printf("  k_int8_stride_ref: [%d, %d, %d, %d]\n", k_int8_stride_ref[0], k_int8_stride_ref[1], k_int8_stride_ref[2], k_int8_stride_ref[3]);
-	printf("  q_scale_stride_ref: [%d, %d, %d, %d]\n", q_scale_stride_ref[0], q_scale_stride_ref[1], q_scale_stride_ref[2], q_scale_stride_ref[3]);
-	printf("  k_scale_stride_ref: [%d, %d, %d, %d]\n", k_scale_stride_ref[0], k_scale_stride_ref[1], k_scale_stride_ref[2], k_scale_stride_ref[3]);
 	
 	// Extract tensor dimensions for quantized outputs (all use workspace now)
 	// NHD layout: [batch, seq, heads, dim]
@@ -253,11 +229,11 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	int q_scale_dim[CCV_NNC_MAX_DIM_ALLOC] = {1, batch_size, Hq, q_scale_blocks};
 	int k_scale_dim[CCV_NNC_MAX_DIM_ALLOC] = {1, batch_size, Hk, k_scale_blocks};
 	
-	printf("DEBUG: Our manual dimensions:\n");
-	printf("  q_int8_dim: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
-	printf("  k_int8_dim: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
-	printf("  q_scale_dim: [%d, %d, %d, %d]\n", q_scale_dim[0], q_scale_dim[1], q_scale_dim[2], q_scale_dim[3]);
-	printf("  k_scale_dim: [%d, %d, %d, %d]\n", k_scale_dim[0], k_scale_dim[1], k_scale_dim[2], k_scale_dim[3]);
+	// printf("DEBUG: Our manual dimensions:\n");
+	// printf("  q_int8_dim: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
+	// printf("  k_int8_dim: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
+	// printf("  q_scale_dim: [%d, %d, %d, %d]\n", q_scale_dim[0], q_scale_dim[1], q_scale_dim[2], q_scale_dim[3]);
+	// printf("  k_scale_dim: [%d, %d, %d, %d]\n", k_scale_dim[0], k_scale_dim[1], k_scale_dim[2], k_scale_dim[3]);
 
 	// Extract tensor strides
 	int qstride[CCV_NNC_MAX_DIM_ALLOC];
@@ -296,25 +272,20 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	k_scale_stride[1] = Hk * k_scale_blocks;           // head stride
 	k_scale_stride[0] = batch_size * Hk * k_scale_blocks;      // batch stride
 	
-	printf("DEBUG: Our manual strides:\n");
-	printf("  q_int8_stride: [%d, %d, %d, %d]\n", q_int8_stride[0], q_int8_stride[1], q_int8_stride[2], q_int8_stride[3]);
-	printf("  k_int8_stride: [%d, %d, %d, %d]\n", k_int8_stride[0], k_int8_stride[1], k_int8_stride[2], k_int8_stride[3]);
-	printf("  q_scale_stride: [%d, %d, %d, %d]\n", q_scale_stride[0], q_scale_stride[1], q_scale_stride[2], q_scale_stride[3]);
-	printf("  k_scale_stride: [%d, %d, %d, %d]\n", k_scale_stride[0], k_scale_stride[1], k_scale_stride[2], k_scale_stride[3]);
-
-	int km_dim[CCV_NNC_MAX_DIM_ALLOC];
-	int km_stride[CCV_NNC_MAX_DIM_ALLOC];
-	ccv_nnc_tensor_view_get_dim(k_mean, km_dim);
-	ccv_nnc_tensor_view_get_stride(k_mean, km_stride);
+	// printf("DEBUG: Our manual strides:\n");
+	// printf("  q_int8_stride: [%d, %d, %d, %d]\n", q_int8_stride[0], q_int8_stride[1], q_int8_stride[2], q_int8_stride[3]);
+	// printf("  k_int8_stride: [%d, %d, %d, %d]\n", k_int8_stride[0], k_int8_stride[1], k_int8_stride[2], k_int8_stride[3]);
+	// printf("  q_scale_stride: [%d, %d, %d, %d]\n", q_scale_stride[0], q_scale_stride[1], q_scale_stride[2], q_scale_stride[3]);
+	// printf("  k_scale_stride: [%d, %d, %d, %d]\n", k_scale_stride[0], k_scale_stride[1], k_scale_stride[2], k_scale_stride[3]);
 
 	// Get CUDA stream
-	printf("DEBUG: stream_context pointer: %p\n", stream_context);
+	// printf("DEBUG: stream_context pointer: %p\n", stream_context);
 	cudaStream_t cuda_stream = ccv_nnc_stream_context_get_stream(stream_context);
-	printf("DEBUG: CUDA stream in flash_attn.cu: %p\n", cuda_stream);
+	// printf("DEBUG: CUDA stream in flash_attn.cu: %p\n", cuda_stream);
 	
 	// If stream is null, use default stream (0)
 	if (cuda_stream == nullptr) {
-		printf("DEBUG: Stream is null, using cudaStreamDefault (0)\n");
+		// printf("DEBUG: Stream is null, using cudaStreamDefault (0)\n");
 		cuda_stream = 0; // Use default stream  
 	}
 
@@ -322,7 +293,7 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
 		(half*)q->data.f16,           // query data
 		(half*)k->data.f16,           // key data
-		(half*)k_mean->data.f16,      // k_mean data
+		NULL,             // k_mean data (workspace)
 		(half*)v->data.f16,           // value data
 		q_int8_workspace,             // q_int8 output data (workspace)
 		k_int8_workspace,             // k_int8 output data (workspace)
@@ -354,21 +325,19 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 		BLKQ,                         // BLKQ
 		WARPQ,                        // WARPQ
 		BLKK,                         // BLKK
-		k_mean ? km_dim : NULL,       // k_mean dimensions (optional)
-		k_mean ? km_stride : NULL,    // k_mean strides (optional)
+		NULL,                       // k_mean dimensions 
+		NULL,                    // k_mean strides
 		cuda_stream                   // CUDA stream
 	);
 
 	CUDA_ENFORCE(cudaGetLastError());
 
-	// Clean up only the k_mean and reference tensors (others use workspace memory)
-	// Workspace memory is automatically managed by the stream context
-	ccv_nnc_tensor_free(k_mean_tensor_4d);
-	ccv_nnc_tensor_free(k_mean_tensor_3d);
-	ccv_nnc_tensor_free(k_int8_tensor_ref);
-	ccv_nnc_tensor_free(q_scale_tensor_ref);
-	ccv_nnc_tensor_free(k_scale_tensor_ref);
-
+	// Clean up descriptors created manually
+	// cudnnDestroyReduceTensorDescriptor(reduce_mean);
+	// cudnnDestroyTensorDescriptor(k_mean_desc);
+	
+	// Clean up CuDNN tensor view descriptor (this doesn't affect workspace)
+	// ccv_nnc_cudnn_deinit_tensor_view_descriptor(k_desc);
 
 	return CCV_NNC_EXEC_SUCCESS;
 }
