@@ -25,6 +25,7 @@ typedef enum {
     DTYPE_FP16 = 0,
     DTYPE_FP16_MIX_FP32 = 1,
     DTYPE_FP32 = 2,
+    DTYPE_FP8_MIX_FP16 = 3,
 } sage_attn_pv_accum_dtype;
 
 // Forward declaration of QuantInt8Kernel

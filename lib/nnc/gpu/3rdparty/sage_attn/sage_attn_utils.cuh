@@ -256,6 +256,50 @@ void ccv_nnc_per_warp_int8_direct(
     cudaStream_t cuda_stream);
 
 /**
+ * Direct kernel wrapper for qk_int8_sv_f8_accum_f16_fuse_v_scale_attn with FP8 value tensor and instruction buffer optimization.
+ * This function provides a low-level interface to the SageAttention kernel with FP8 value support.
+ * 
+ * @param Q             INT8 query tensor data pointer
+ * @param K             INT8 key tensor data pointer  
+ * @param V             INT8 value tensor data pointer (FP8)
+ * @param O             FP16 output tensor data pointer
+ * @param Q_scale       FP32 query quantization scales
+ * @param K_scale       FP32 key quantization scales
+ * @param V_scale       FP32 value quantization scales
+ * @param qdim          Query tensor dimensions [batch, heads, seq, dim] or [batch, seq, heads, dim]
+ * @param kdim          Key tensor dimensions
+ * @param vdim          Value tensor dimensions
+ * @param odim          Output tensor dimensions
+ * @param qscale_dim    Query scale tensor dimensions
+ * @param kscale_dim    Key scale tensor dimensions
+ * @param vscale_dim    Value scale tensor dimensions
+ * @param qstride       Query tensor strides
+ * @param kstride       Key tensor strides
+ * @param vstride       Value tensor strides
+ * @param ostride       Output tensor strides
+ * @param qscale_stride Query scale tensor strides
+ * @param kscale_stride Key scale tensor strides
+ * @param vscale_stride Value scale tensor strides
+ * @param tensor_layout Tensor layout: 0=NHD [batch, seq, heads, dim], 1=HND [batch, heads, seq, dim]
+ * @param is_causal     Whether to apply causal masking (0=false, 1=true)
+ * @param qk_quant_gran Quantization granularity: 2=per_warp, 3=per_thread
+ * @param sm_scale      Softmax scale factor (typically 1/sqrt(head_dim))
+ * @param return_lse    Whether to return log-sum-exp (0=false, 1=true)
+ */
+void qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf_direct(
+    int8_t *Q, int8_t *K, int8_t *V, half *O,
+    float *Q_scale, float *K_scale, float *V_scale,
+    int qdim[], int kdim[], int vdim[], int odim[], 
+    int qscale_dim[], int kscale_dim[], int vscale_dim[],
+    int qstride[], int kstride[], int vstride[], int ostride[],
+    int qscale_stride[], int kscale_stride[], int vscale_stride[],
+    int tensor_layout,
+    int is_causal,
+    int qk_quant_gran,
+    float sm_scale,
+    int return_lse);
+
+/**
  * Direct kernel wrapper for complete SageAttention computation with quantized QK and FP16 V.
  * This function combines quantization and attention computation in one call.
  * 
@@ -339,4 +383,208 @@ void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
     int km_dim[],            // K mean dimensions (can be NULL if k_mean is NULL)
     int km_stride[],         // K mean strides (can be NULL if k_mean is NULL)
     cudaStream_t cuda_stream);
+
+/**
+ * Direct kernel wrapper for qk_int8_sv_f8_accum_f32_fuse_v_scale_attn with FP8 value tensor, FP32 accumulation and instruction buffer optimization.
+ * This function provides a low-level interface to the SageAttention kernel with FP8 value support and FP32 accumulation.
+ * 
+ * @param Q             INT8 query tensor data pointer
+ * @param K             INT8 key tensor data pointer  
+ * @param V             INT8 value tensor data pointer (FP8)
+ * @param O             FP16 output tensor data pointer
+ * @param Q_scale       FP32 query quantization scales
+ * @param K_scale       FP32 key quantization scales
+ * @param V_scale       FP32 value quantization scales
+ * @param qdim          Query tensor dimensions [batch, heads, seq, dim] or [batch, seq, heads, dim]
+ * @param kdim          Key tensor dimensions
+ * @param vdim          Value tensor dimensions
+ * @param odim          Output tensor dimensions
+ * @param qscale_dim    Query scale tensor dimensions
+ * @param kscale_dim    Key scale tensor dimensions
+ * @param vscale_dim    Value scale tensor dimensions
+ * @param qstride       Query tensor strides
+ * @param kstride       Key tensor strides
+ * @param vstride       Value tensor strides
+ * @param ostride       Output tensor strides
+ * @param qscale_stride Query scale tensor strides
+ * @param kscale_stride Key scale tensor strides
+ * @param vscale_stride Value scale tensor strides
+ * @param tensor_layout Tensor layout: 0=NHD [batch, seq, heads, dim], 1=HND [batch, heads, seq, dim]
+ * @param sm_scale      Softmax scale factor (typically 1/sqrt(head_dim))
+ */
+void qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf_direct(
+    int8_t *Q, int8_t *K, int8_t *V, half *O,
+    float *Q_scale, float *K_scale, float *V_scale,
+    int qdim[], int kdim[], int vdim[], int odim[], 
+    int qscale_dim[], int kscale_dim[], int vscale_dim[],
+    int qstride[], int kstride[], int vstride[], int ostride[],
+    int qscale_stride[], int kscale_stride[], int vscale_stride[],
+    int tensor_layout,
+    float sm_scale);
+
+/**
+ * Direct kernel wrapper for FP8 quantization with fused scaling.
+ * This function provides a low-level interface to quantize FP16 tensors to FP8/INT8 with fused scaling.
+ * 
+ * @param input           Input tensor data (FP16) 
+ * @param output          Output tensor data (FP8/INT8)
+ * @param scale           Scale tensor data (FP32)
+ * @param input_dim       Input dimensions
+ * @param output_dim      Output dimensions
+ * @param scale_dim       Scale dimensions
+ * @param input_stride    Input tensor strides
+ * @param output_stride   Output tensor strides
+ * @param scale_stride    Scale tensor strides
+ * @param num_tokens      Actual number of tokens (unpadded)
+ * @param scale_max       Maximum scale value
+ * @param tensor_layout   Tensor layout: 0=NHD, 1=HND
+ * @param cuda_stream     CUDA stream for asynchronous execution
+ */
+void ccv_nnc_scale_fuse_quant_cuda_direct(
+    half *input,              // Input tensor data (FP16) 
+    int8_t *output,           // Output tensor data (FP8/INT8)
+    float *scale,             // Scale tensor data (FP32)
+    int input_dim[],          // Input dimensions
+    int output_dim[],         // Output dimensions
+    int scale_dim[],          // Scale dimensions
+    int input_stride[],       // Input tensor strides
+    int output_stride[],      // Output tensor strides
+    int scale_stride[],       // Scale tensor strides
+    int num_tokens,           // Actual number of tokens (unpadded)
+    float scale_max,          // Maximum scale value
+    int tensor_layout,        // Tensor layout: 0=NHD, 1=HND
+    cudaStream_t cuda_stream);
+
+/**
+ * Direct kernel wrapper for FP8 quantization with fused scaling and mean computation.
+ * This function provides a low-level interface to quantize FP16 tensors to FP8/INT8 with fused scaling
+ * while computing and subtracting means.
+ * 
+ * @param input           Input tensor data (FP16) 
+ * @param output          Output tensor data (FP8/INT8)
+ * @param mean            Mean tensor data (FP32)
+ * @param scale           Scale tensor data (FP32)
+ * @param input_dim       Input dimensions
+ * @param output_dim      Output dimensions
+ * @param mean_dim        Mean dimensions
+ * @param scale_dim       Scale dimensions
+ * @param input_stride    Input tensor strides
+ * @param output_stride   Output tensor strides
+ * @param mean_stride     Mean tensor strides
+ * @param scale_stride    Scale tensor strides
+ * @param num_tokens      Actual number of tokens (unpadded)
+ * @param scale_max       Maximum scale value
+ * @param tensor_layout   Tensor layout: 0=NHD, 1=HND
+ * @param cuda_stream     CUDA stream for asynchronous execution
+ */
+void ccv_nnc_mean_scale_fuse_quant_cuda_direct(
+    half *input,              // Input tensor data (FP16) 
+    int8_t *output,           // Output tensor data (FP8/INT8)
+    float *mean,              // Mean tensor data (FP32)
+    float *scale,             // Scale tensor data (FP32)
+    int input_dim[],          // Input dimensions
+    int output_dim[],         // Output dimensions
+    int mean_dim[],           // Mean dimensions
+    int scale_dim[],          // Scale dimensions
+    int input_stride[],       // Input tensor strides
+    int output_stride[],      // Output tensor strides
+    int mean_stride[],        // Mean tensor strides
+    int scale_stride[],       // Scale tensor strides
+    int num_tokens,           // Actual number of tokens (unpadded)
+    float scale_max,          // Maximum scale value
+    int tensor_layout,        // Tensor layout: 0=NHD, 1=HND
+    cudaStream_t cuda_stream);
+
+/**
+ * Direct kernel wrapper for SageAttention with INT8 Q/K and FP8 V quantization.
+ * This function provides a complete pipeline for quantized attention computation
+ * with FP32+FP32 accumulation for maximum accuracy.
+ * 
+ * @param query           Input Q tensor data (FP16)
+ * @param key             Input K tensor data (FP16)
+ * @param k_mean          Optional K mean tensor data (FP16, can be NULL)
+ * @param value           Input V tensor data (FP16)
+ * @param q_int8          Output Q quantized (INT8)
+ * @param k_int8          Output K quantized (INT8)
+ * @param v_fp8           Output V quantized (FP8)
+ * @param query_scale     Output Q scales (FP32)
+ * @param key_scale       Output K scales (FP32)
+ * @param value_scale     Output V scales (FP32)
+ * @param output          Output tensor data (FP16)
+ * @param qdim            Query tensor dimensions [batch, seq/heads, heads/seq, dim]
+ * @param kdim            Key tensor dimensions
+ * @param vdim            Value tensor dimensions
+ * @param odim            Output tensor dimensions
+ * @param q_int8_dim      Q quantized output dimensions
+ * @param k_int8_dim      K quantized output dimensions
+ * @param v_fp8_dim       V quantized output dimensions
+ * @param query_scale_dim Q scale tensor dimensions
+ * @param key_scale_dim   K scale tensor dimensions
+ * @param value_scale_dim V scale tensor dimensions
+ * @param qstride         Query tensor strides
+ * @param kstride         Key tensor strides
+ * @param vstride         Value tensor strides
+ * @param ostride         Output tensor strides
+ * @param q_int8_stride   Q quantized output strides
+ * @param k_int8_stride   K quantized output strides
+ * @param v_fp8_stride    V quantized output strides
+ * @param query_scale_stride Q scale tensor strides
+ * @param key_scale_stride K scale tensor strides
+ * @param value_scale_stride V scale tensor strides
+ * @param tensor_layout   0=NHD, 1=HND (only NHD supported currently)
+ * @param is_causal       Whether to apply causal masking
+ * @param qk_quant_gran   Quantization granularity (2=per_warp supported)
+ * @param sm_scale        Softmax scale factor
+ * @param return_lse      Whether to return log-sum-exp (0 for our case)
+ * @param pv_accum_dtype  PV accumulation dtype (2=FP32+FP32 supported)
+ * @param km_dim          K mean dimensions (can be NULL if k_mean is NULL)
+ * @param km_stride       K mean strides (can be NULL if k_mean is NULL)
+ * @param cuda_stream     CUDA stream for asynchronous execution
+ * 
+ * Note: BLKQ=128, WARPQ=32, BLKK=64 are fixed for FP8 version
+ */
+void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
+    half *query,
+    half *key,
+    half *k_mean,
+    half *value,
+    int8_t *q_int8,
+    int8_t *k_int8,
+    int8_t *v_fp8,
+    float *query_scale,
+    float *key_scale,
+    float *value_scale,
+    half *output,
+    int qdim[],
+    int kdim[],
+    int vdim[],
+    int odim[],
+    int q_int8_dim[],
+    int k_int8_dim[],
+    int v_fp8_dim[],
+    int query_scale_dim[],
+    int key_scale_dim[],
+    int value_scale_dim[],
+    int qstride[],
+    int kstride[],
+    int vstride[],
+    int ostride[],
+    int q_int8_stride[],
+    int k_int8_stride[],
+    int v_fp8_stride[],
+    int query_scale_stride[],
+    int key_scale_stride[],
+    int value_scale_stride[],
+    int tensor_layout,
+    int is_causal,
+    int qk_quant_gran,
+    float sm_scale,
+    int return_lse,
+    int pv_accum_dtype,
+    int km_dim[],
+    int km_stride[],
+    cudaStream_t cuda_stream);
+
+#ifdef __cplusplus
 }
+#endif

@@ -546,3 +546,16 @@ __global__ void MeanScaleKernel(T *__restrict__ input, int8_t *__restrict__ outp
     *(uint2*)(output_ptr_base + i * gmem_stride) = *(uint2*)(&x_val_fp8[0]);
   }
 }
+
+// Template instantiations for CCV scale_fuse_quant and mean_scale_fuse_quant functions
+template __global__ void MeanScaleKernel<64u, false, half>(half *__restrict__ input, int8_t *__restrict__ output, float *__restrict__ mean, float *__restrict__ scale, const float scale_max, const uint32_t num_tokens,
+                                                           const uint32_t stride_bz_input, const uint32_t stride_h_input, const uint32_t stride_d_input,
+                                                           const uint32_t stride_bz_output, const uint32_t stride_h_output, const uint32_t stride_d_output,
+                                                           const uint32_t stride_bz_mean, const uint32_t stride_h_mean,
+                                                           const uint32_t stride_bz_scale, const uint32_t stride_h_scale);
+
+template __global__ void MeanScaleKernel<64u, true, half>(half *__restrict__ input, int8_t *__restrict__ output, float *__restrict__ mean, float *__restrict__ scale, const float scale_max, const uint32_t num_tokens,
+                                                          const uint32_t stride_bz_input, const uint32_t stride_h_input, const uint32_t stride_d_input,
+                                                          const uint32_t stride_bz_output, const uint32_t stride_h_output, const uint32_t stride_d_output,
+                                                          const uint32_t stride_bz_mean, const uint32_t stride_h_mean,
+                                                          const uint32_t stride_bz_scale, const uint32_t stride_h_scale);
