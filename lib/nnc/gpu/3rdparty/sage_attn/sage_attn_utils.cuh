@@ -502,7 +502,6 @@ void ccv_nnc_mean_scale_fuse_quant_cuda_direct(
  * 
  * @param query           Input Q tensor data (FP16)
  * @param key             Input K tensor data (FP16)
- * @param k_mean          Optional K mean tensor data (FP16, can be NULL)
  * @param value           Input V tensor data (FP16)
  * @param q_int8          Output Q quantized (INT8)
  * @param k_int8          Output K quantized (INT8)
@@ -537,8 +536,6 @@ void ccv_nnc_mean_scale_fuse_quant_cuda_direct(
  * @param sm_scale        Softmax scale factor
  * @param return_lse      Whether to return log-sum-exp (0 for our case)
  * @param pv_accum_dtype  PV accumulation dtype (2=FP32+FP32 supported)
- * @param km_dim          K mean dimensions (can be NULL if k_mean is NULL)
- * @param km_stride       K mean strides (can be NULL if k_mean is NULL)
  * @param cuda_stream     CUDA stream for asynchronous execution
  * 
  * Note: BLKQ=128, WARPQ=32, BLKK=64 are fixed for FP8 version
@@ -546,8 +543,8 @@ void ccv_nnc_mean_scale_fuse_quant_cuda_direct(
 void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     half *query,
     half *key,
-    half *k_mean,
     half *value,
+    half *v_transposed,       // Intermediate V tensor after transpose_pad_permute (FP16)
     int8_t *q_int8,
     int8_t *k_int8,
     int8_t *v_fp8,
@@ -581,8 +578,6 @@ void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     float sm_scale,
     int return_lse,
     int pv_accum_dtype,
-    int km_dim[],
-    int km_stride[],
     cudaStream_t cuda_stream);
 
 #ifdef __cplusplus

@@ -12,7 +12,33 @@
 #include <time.h>
 #include "nnc/ccv_nnc_internal.h"
 
-
+void ccv_nnc_per_warp_int8_direct(
+    __fp16 *q,            // Input Q tensor data (FP16)
+    __fp16 *k,            // Input K tensor data (FP16)
+    int8_t *q_int8,       // Output Q quantized (INT8)
+    int8_t *k_int8,       // Output K quantized (INT8)
+    float *q_scale,       // Output Q scales (FP32)
+    float *k_scale,       // Output K scales (FP32)
+    __fp16 *km,           // Optional K mean tensor data (FP16, can be NULL)
+    int qdim[],           // Q dimensions [batch, seq/heads, heads/seq, dim]
+    int kdim[],           // K dimensions
+    int q_int8_dim[],     // Q output dimensions
+    int k_int8_dim[],     // K output dimensions
+    int q_scale_dim[],    // Q scale dimensions
+    int k_scale_dim[],    // K scale dimensions
+    int km_dim[],         // K mean dimensions (can be NULL if km is NULL)
+    int qstride[],        // Q strides
+    int kstride[],        // K strides
+    int q_int8_stride[],  // Q output strides
+    int k_int8_stride[],  // K output strides
+    int q_scale_stride[], // Q scale strides
+    int k_scale_stride[], // K scale strides
+    int km_stride[],      // K mean strides (can be NULL if km is NULL)
+    int BLKQ,             // Block size for Q (128)
+    int WARPQ,            // Warp size for Q (32)
+    int BLKK,             // Block size for K (64)
+    int tensor_layout,    // 0=NHD, 1=HND
+    cudaStream_t cuda_stream);
 
 TEST_SETUP()
 {
@@ -6558,6 +6584,230 @@ TEST_CASE("qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf_direct NHD test")
 #endif
 }
 
+TEST_CASE("ccv_nnc_transpose_pad_permute_cuda_direct NHD test")
+{
+    ccv_cli_set_output_levels(CCV_CLI_VERBOSE);
+    GUARD_ELSE_RETURN(ccv_nnc_cmd_ok(CCV_NNC_SCALED_DOT_PRODUCT_ATTENTION_FORWARD, CCV_NNC_BACKEND_GPU_REF) &&
+                      ccv_nnc_cmd_ok(CCV_NNC_DATA_TRANSFER_FORWARD, CCV_NNC_BACKEND_GPU_REF));
+
+    printf("=== CCV SageAttention ccv_nnc_transpose_pad_permute_cuda_direct Test ===\n");
+
+    // Test parameters matching Python reference script
+    const int B = 1;      // batch size
+    const int H = 8;      // number of heads  
+    const int D = 128;    // head dimension
+    const int S = 64;     // sequence length
+    const int tensor_layout = 0;     // 0=NHD, 1=HND
+
+    printf("Test parameters: B=%d, H=%d, D=%d, S=%d\n", B, H, D, S);
+    printf("tensor_layout: %d\n", tensor_layout);
+    
+    if (tensor_layout == 0) { // NHD layout
+        printf("Input tensor shape: (%d, %d, %d, %d) [B, S, H, D]\n", B, S, H, D);
+        const int padded_S = ((S + 63) / 64) * 64; // Pad to multiple of 64
+        printf("Output tensor shape: (%d, %d, %d, %d) [B, D, H, padded_S]\n", B, D, H, padded_S);
+        printf("Padded sequence length: %d\n", padded_S);
+        
+        // Create input tensor (NHD format: [B, S, H, D])
+        ccv_nnc_tensor_t* const input_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(32F, B, S, H, D), 0);
+        
+        // Load input data from Python reference script
+        FILE* input_file = fopen("/tmp/test_transpose_input.bin", "rb");
+        if (input_file) {
+            // Convert to FP32 for loading, then convert to FP16
+            uint16_t* temp_fp16_data = (uint16_t*)malloc(B * S * H * D * sizeof(uint16_t));
+            fread(temp_fp16_data, sizeof(uint16_t), B * S * H * D, input_file);
+            fclose(input_file);
+            
+            // Convert FP16 to FP32 for CCV tensor
+            for (int i = 0; i < B * S * H * D; i++) {
+                union { uint16_t u16; __fp16 f16; } fp16_union;
+                fp16_union.u16 = temp_fp16_data[i];
+                input_tensor->data.f32[i] = (float)fp16_union.f16;
+            }
+            free(temp_fp16_data);
+            printf("✓ Loaded input from /tmp/test_transpose_input.bin\n");
+        } else {
+            printf("❌ Could not load /tmp/test_transpose_input.bin - using random data\n");
+            printf("Run: python /home/wlin1/Drawthings/ccv/test_transpose_pad_permute_cuda_reference.py\n");
+            
+            // Fill with random data as fallback
+            dsfmt_t dsfmt;
+            dsfmt_init_gen_rand(&dsfmt, 42);
+            for (int i = 0; i < B * S * H * D; i++) {
+                input_tensor->data.f32[i] = (dsfmt_genrand_open_close(&dsfmt) - 0.5) * 0.2;
+            }
+        }
+
+        // Calculate input range
+        float input_min = input_tensor->data.f32[0], input_max = input_tensor->data.f32[0];
+        for (int i = 1; i < B * S * H * D; i++) {
+            if (input_tensor->data.f32[i] < input_min) input_min = input_tensor->data.f32[i];
+            if (input_tensor->data.f32[i] > input_max) input_max = input_tensor->data.f32[i];
+        }
+        printf("Input tensor range: [%.6f, %.6f]\n", input_min, input_max);
+        
+        // Print input data for verification (matching Python format)
+        printf("Input sample (first 10): ");
+        for (int i = 0; i < 10; i++) {
+            printf("%.4f ", input_tensor->data.f32[i]);
+        }
+        printf("\n");
+
+        // Convert to FP16 and transfer to GPU
+        ccv_nnc_tensor_t* const input_tensor_f16 = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, S, H, D), 0);
+        ccv_nnc_cmd_exec(CMD_DATATYPE_CONVERSION_FORWARD(), ccv_nnc_no_hint, 0, 
+                         TENSOR_LIST(input_tensor), TENSOR_LIST(input_tensor_f16), 0);
+
+        ccv_nnc_tensor_t* const gpu_input_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, S, H, D), 0);
+        ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0,
+            TENSOR_LIST(input_tensor_f16), TENSOR_LIST(gpu_input_tensor), 0);
+
+        // Create output tensor on GPU (NHD -> [B, D, H, padded_S])
+        ccv_nnc_tensor_t* const gpu_output_tensor = ccv_nnc_tensor_new(0, GPU_TENSOR_NHWC(000, 16F, B, D, H, padded_S), 0);
+
+        printf("\n");
+        // Run direct transpose function
+#ifdef HAVE_CUDA_SM80
+        extern void ccv_nnc_transpose_pad_permute_cuda_direct(
+            __fp16 *input, __fp16 *output,
+            int input_dim[], int output_dim[],
+            int input_stride[], int output_stride[],
+            int num_tokens, int tensor_layout, cudaStream_t cuda_stream);
+
+        printf("Calling ccv_nnc_transpose_pad_permute_cuda_direct...\n");
+
+        // Prepare dimension and stride arrays
+        int input_dim[] = {B, S, H, D};       // Input shape: [B, S, H, D] (NHD)
+        int output_dim[] = {B, D, H, padded_S}; // Output shape: [B, D, H, padded_S] (transposed)
+
+        // Calculate strides for [B, S, H, D] input layout
+        int input_stride[] = {S * H * D, H * D, D, 1};
+        // Calculate strides for [B, D, H, padded_S] output layout
+        int output_stride[] = {D * H * padded_S, H * padded_S, padded_S, 1};
+
+        ccv_nnc_transpose_pad_permute_cuda_direct(
+            (__fp16*)gpu_input_tensor->data.f16,   // Input tensor (FP16)
+            (__fp16*)gpu_output_tensor->data.f16,  // Output tensor (FP16)
+            input_dim, output_dim,                  // Tensor dimensions
+            input_stride, output_stride,            // Tensor strides
+            S,                                      // num_tokens (actual sequence length)
+            tensor_layout,                          // Tensor layout (0=NHD)
+            0                                       // CUDA stream (default)
+        );
+
+        cudaDeviceSynchronize();
+        printf("✓ transpose_pad_permute_cuda completed successfully\n");
+
+        // Copy results back to CPU for verification
+        ccv_nnc_tensor_t* const cpu_output_tensor = ccv_nnc_tensor_new(0, CPU_TENSOR_NHWC(16F, B, D, H, padded_S), 0);
+
+        ccv_nnc_cmd_exec(CMD_DATA_TRANSFER_FORWARD(), ccv_nnc_no_hint, 0,
+            TENSOR_LIST(gpu_output_tensor), TENSOR_LIST(cpu_output_tensor), 0);
+
+        // Verify output
+        printf("\n=== CCV Output Analysis ===\n");
+        printf("Output tensor shape: [%d, %d, %d, %d]\n", B, D, H, padded_S);
+
+        // Print sample outputs
+        __fp16* output_data = cpu_output_tensor->data.f16;
+
+        printf("Output sample (first 10): ");
+        for (int i = 0; i < 10; i++) {
+            printf("%.4f ", (float)output_data[i]);
+        }
+        printf("\n");
+
+        // Calculate output ranges
+        float output_min = (float)output_data[0], output_max = (float)output_data[0];
+        for (int i = 1; i < B * D * H * padded_S; i++) {
+            float val = (float)output_data[i];
+            if (val < output_min) output_min = val;
+            if (val > output_max) output_max = val;
+        }
+        printf("Output range: [%.6f, %.6f]\n", output_min, output_max);
+
+        // Compare with PyTorch reference results
+        printf("\n=== CCV vs PyTorch Reference Comparison ===\n");
+        FILE* pytorch_output_file = fopen("/tmp/pytorch_transpose_output.bin", "rb");
+
+        if (pytorch_output_file) {
+            // Load PyTorch reference results
+            uint16_t* pytorch_output_raw = (uint16_t*)malloc(B * D * H * padded_S * sizeof(uint16_t));
+            fread(pytorch_output_raw, sizeof(uint16_t), B * D * H * padded_S, pytorch_output_file);
+            fclose(pytorch_output_file);
+
+            // Convert to __fp16 for comparison
+            __fp16* pytorch_output = (__fp16*)malloc(B * D * H * padded_S * sizeof(__fp16));
+            for (int i = 0; i < B * D * H * padded_S; i++) {
+                union { uint16_t u16; __fp16 f16; } fp16_union;
+                fp16_union.u16 = pytorch_output_raw[i];
+                pytorch_output[i] = fp16_union.f16;
+            }
+            free(pytorch_output_raw);
+
+            // Compare output values (first 20)
+            printf("Output comparison (first 20 values):\n");
+            int output_matches = 0;
+            for (int i = 0; i < 20; i++) {
+                float ccv_val = (float)output_data[i];
+                float pytorch_val = (float)pytorch_output[i];
+                float diff = fabsf(ccv_val - pytorch_val);
+                if (diff < 1e-4) output_matches++;
+                printf("  [%d] CCV: %.6f, PyTorch: %.6f, diff: %.6f %s\n", i, 
+                    ccv_val, pytorch_val, diff, (diff < 1e-4) ? "✓" : "✗");
+            }
+
+            // Full comparison statistics  
+            int total_output_matches = 0;
+            float max_diff = 0.0f;
+            for (int i = 0; i < B * D * H * padded_S; i++) {
+                float ccv_val = (float)output_data[i];
+                float pytorch_val = (float)pytorch_output[i];
+                float diff = fabsf(ccv_val - pytorch_val);
+                if (diff < 1e-4) total_output_matches++;
+                if (diff > max_diff) max_diff = diff;
+            }
+
+            printf("\nFull comparison statistics:\n");
+            printf("  Output close matches: %d/%d (%.2f%%)\n", 
+                total_output_matches, B * D * H * padded_S, (100.0 * total_output_matches) / (B * D * H * padded_S));
+            printf("  Maximum difference: %.8f\n", max_diff);
+
+            if (total_output_matches > 0.99 * B * D * H * padded_S) {
+                printf("🎯 EXCELLENT: CCV transpose_pad_permute matches PyTorch reference (>99%% match)\n");
+            } else if (total_output_matches > 0.95 * B * D * H * padded_S) {
+                printf("✅ GOOD: CCV transpose_pad_permute is very close to PyTorch reference (>95%% match)\n");
+            } else {
+                printf("⚠️  WARNING: Significant differences between CCV and PyTorch transpose_pad_permute\n");
+            }
+
+            free(pytorch_output);
+        } else {
+            printf("PyTorch reference results not found.\n");
+            printf("Run: python /home/wlin1/Drawthings/ccv/test_transpose_pad_permute_cuda_reference.py\n");
+            printf("This will generate the reference files:\n");
+            printf("  /tmp/test_transpose_input.bin\n");
+            printf("  /tmp/pytorch_transpose_output.bin\n");
+            printf("  /tmp/test_transpose_params.txt\n");
+        }
+
+        // Cleanup tensors
+        ccv_nnc_tensor_free(input_tensor);
+        ccv_nnc_tensor_free(input_tensor_f16);
+        ccv_nnc_tensor_free(gpu_input_tensor);
+        ccv_nnc_tensor_free(gpu_output_tensor);
+        ccv_nnc_tensor_free(cpu_output_tensor);
+
+        printf("✅ ccv_nnc_transpose_pad_permute_cuda_direct test completed successfully!\n");
+#else
+        printf("⚠️  Test skipped - CUDA SM80+ required for SageAttention\n");
+#endif
+    } else {
+        printf("⚠️  HND layout not implemented yet in test case\n");
+    }
+}
+
 TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
 {
 #ifdef HAVE_CUDA
@@ -6605,12 +6855,14 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
     __fp16* gpu_q_fp16;
     __fp16* gpu_k_fp16;
     __fp16* gpu_v_fp16;
-    __fp16* gpu_k_mean;  // K mean for quantization
+    __fp16* gpu_v_transposed;  // Intermediate V tensor after transpose_pad_permute
+    __fp16* gpu_k_mean;        // K mean for quantization
     __fp16* gpu_output;
     
     cudaMalloc(&gpu_q_fp16, B * S * H * D * sizeof(__fp16));
     cudaMalloc(&gpu_k_fp16, B * S * H * D * sizeof(__fp16));
     cudaMalloc(&gpu_v_fp16, B * S * H * D * sizeof(__fp16));
+    cudaMalloc(&gpu_v_transposed, B * D * H * S * sizeof(__fp16));  // V transposed: [B, D, H, S]
     cudaMalloc(&gpu_k_mean, B * S * H * sizeof(__fp16));  // Mean per token
     cudaMalloc(&gpu_output, B * S * H * D * sizeof(__fp16));
     
@@ -6624,7 +6876,7 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
     
     cudaMalloc(&gpu_q_int8, B * S * H * D * sizeof(int8_t));
     cudaMalloc(&gpu_k_int8, B * S * H * D * sizeof(int8_t));
-    cudaMalloc(&gpu_v_fp8, B * D * H * padded_S * sizeof(int8_t));  // V layout: [B, D, H, padded_S]
+    cudaMalloc(&gpu_v_fp8, B * D * H * S * sizeof(int8_t));  // V layout: [B, D, H, S]
     
     // Allocate GPU memory for scales
     float* gpu_q_scales;
@@ -6654,10 +6906,10 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
     
     int q_int8_dim[4] = {B, S, H, D};
     int k_int8_dim[4] = {B, S, H, D};
-    int v_fp8_dim[4] = {B, D, H, padded_S};  // V after transpose_pad_permute: [B, D, H, padded_S]
+    int v_fp8_dim[4] = {B, D, H, S};  // V after transpose_pad_permute: [B, D, H, S]
     
-    int qscale_dim[3] = {B, H, 4};  // per-warp scales
-    int kscale_dim[3] = {B, H, 1};  // per-block scales
+    int qscale_dim[3] = {1, B, H, 4};  // per-warp scales
+    int kscale_dim[3] = {1, B, H, 1};  // per-block scales
     int vscale_dim[3] = {B, H, D};  // per-channel scales
     int km_dim[3] = {B, S, H};      // K mean dimensions
     
@@ -6670,9 +6922,9 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
     int q_int8_stride[4] = {S*H*D, H*D, D, 1};
     int k_int8_stride[4] = {S*H*D, H*D, D, 1};
     int v_fp8_stride[4] = {D*H*padded_S, H*padded_S, padded_S, 1};  // V output strides for [B, D, H, padded_S]
-    
-    int qscale_stride[3] = {H*4, 4, 1};
-    int kscale_stride[3] = {H*1, 1, 1};
+	
+    int qscale_stride[3] = {B*H*4, H*4, 4, 1};
+    int kscale_stride[3] = {B*H*1, 1, 1};
     int vscale_stride[3] = {H*D, D, 1};
     int km_stride[3] = {S*H, H, 1};
     
@@ -6687,7 +6939,7 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
     
     // Import the function
     extern void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
-        __fp16 *query, __fp16 *key, __fp16 *k_mean, __fp16 *value,
+        __fp16 *query, __fp16 *key, __fp16 *value, __fp16 *v_transposed,
         int8_t *q_int8, int8_t *k_int8, int8_t *v_fp8,
         float *query_scale, float *key_scale, float *value_scale,
         __fp16 *output,
@@ -6699,11 +6951,11 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
         int qscale_stride[], int kscale_stride[], int vscale_stride[],
         int tensor_layout, int is_causal, int qk_quant_gran,
         float sm_scale, int return_lse, int pv_accum_dtype,
-        int km_dim[], int km_stride[], cudaStream_t cuda_stream);
+		cudaStream_t cuda_stream);
     
     // Call the function
     ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
-        gpu_q_fp16, gpu_k_fp16, gpu_k_mean, gpu_v_fp16,
+        gpu_q_fp16, gpu_k_fp16, gpu_v_fp16, gpu_v_transposed,
         gpu_q_int8, gpu_k_int8, gpu_v_fp8,
         gpu_q_scales, gpu_k_scales, gpu_v_scales,
         gpu_output,
@@ -6719,7 +6971,6 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
         scale, // sm_scale
         0,     // return_lse (false)
         2,     // pv_accum_dtype (2=fp32+fp32)
-        km_dim, km_stride,
         0      // cuda_stream (default stream)
     );
     
@@ -6941,6 +7192,7 @@ TEST_CASE("ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct NHD test")
     cudaFree(gpu_q_fp16);
     cudaFree(gpu_k_fp16);
     cudaFree(gpu_v_fp16);
+    cudaFree(gpu_v_transposed);
     cudaFree(gpu_k_mean);
     cudaFree(gpu_output);
     cudaFree(gpu_q_int8);

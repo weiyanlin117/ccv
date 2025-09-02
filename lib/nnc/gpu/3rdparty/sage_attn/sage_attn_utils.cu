@@ -956,7 +956,7 @@ extern "C" void qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf_direct(
     // Check for CUDA errors
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
-        fprintf(stderr, "ERROR: qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf_direct kernel failed: %s\n", 
+        fprintf(stderr, "ERROR: qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf_direct kernel failed: %s\n", 
                 cudaGetErrorString(error));
     }
 }
@@ -1062,6 +1062,120 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct(
         fprintf(stderr, "ERROR: ccv_nnc_sageattn_qk_int8_pv_fp16_cuda_direct failed: %s\n", 
                cudaGetErrorString(error));
         return;
+    }
+}
+
+extern "C" void ccv_nnc_transpose_pad_permute_cuda_direct(
+    half *input,              // Input tensor data (FP16)
+    half *output,             // Output tensor data (FP16) 
+    int input_dim[],          // Input dimensions [batch, seq, heads, dim] for NHD
+    int output_dim[],         // Output dimensions [batch, dim, heads, padded_seq] for NHD
+    int input_stride[],       // Input tensor strides
+    int output_stride[],      // Output tensor strides
+    int num_tokens,           // Actual number of tokens (unpadded)
+    int tensor_layout,        // Tensor layout: 0=NHD, 1=HND
+    cudaStream_t cuda_stream)
+{
+    // Validate inputs
+    assert(input && output);
+    
+    constexpr int CTA_SIZE = 64; // Block size for transpose operation
+    
+    // Extract dimensions 
+    int batch_size, head_dim, num_heads, padded_num_tokens;
+    uint32_t stride_bz_input, stride_seq_input, stride_h_input;
+    uint32_t stride_bz_output, stride_d_output, stride_h_output;
+    
+    if (tensor_layout == 0) { // NHD layout
+        // Input: [batch, seq, heads, dim]
+        batch_size = input_dim[0];
+        num_tokens = input_dim[1]; 
+        num_heads = input_dim[2];
+        head_dim = input_dim[3];
+        
+        // Output: [batch, dim, heads, padded_seq]
+        padded_num_tokens = output_dim[3];
+        
+        // Input strides
+        stride_bz_input = input_stride[0];
+        stride_seq_input = input_stride[1];
+        stride_h_input = input_stride[2];
+        
+        // Output strides
+        stride_bz_output = output_stride[0];
+        stride_d_output = output_stride[1];
+        stride_h_output = output_stride[2];
+        
+        // Validate transformation: [B, S, H, D] -> [B, D, H, padded_S]
+        if (output_dim[0] != batch_size || output_dim[1] != head_dim || 
+            output_dim[2] != num_heads || output_dim[3] < num_tokens) {
+            fprintf(stderr, "ERROR: Invalid NHD transpose dimensions: input [%d,%d,%d,%d] -> output [%d,%d,%d,%d]\n",
+                   batch_size, num_tokens, num_heads, head_dim,
+                   output_dim[0], output_dim[1], output_dim[2], output_dim[3]);
+            return;
+        }
+        
+    } else { // HND layout
+        // Input: [batch, heads, seq, dim]
+        batch_size = input_dim[0];
+        num_heads = input_dim[1];
+        num_tokens = input_dim[2];
+        head_dim = input_dim[3];
+        
+        // Output: [batch, heads, dim, padded_seq]  
+        padded_num_tokens = output_dim[3];
+        
+        // Input strides
+        stride_bz_input = input_stride[0];
+        stride_h_input = input_stride[1];
+        stride_seq_input = input_stride[2];
+        
+        // Output strides
+        stride_bz_output = output_stride[0];
+        stride_h_output = output_stride[1];
+        stride_d_output = output_stride[2];
+        
+        // Validate transformation: [B, H, S, D] -> [B, H, D, padded_S]
+        if (output_dim[0] != batch_size || output_dim[1] != num_heads || 
+            output_dim[2] != head_dim || output_dim[3] < num_tokens) {
+            fprintf(stderr, "ERROR: Invalid HND transpose dimensions: input [%d,%d,%d,%d] -> output [%d,%d,%d,%d]\n",
+                   batch_size, num_heads, num_tokens, head_dim,
+                   output_dim[0], output_dim[1], output_dim[2], output_dim[3]);
+            return;
+        }
+    }
+    
+    printf("DEBUG: transpose_pad_permute [%d,%d,%d,%d] -> [%d,%d,%d,%d], num_tokens=%d\n",
+           input_dim[0], input_dim[1], input_dim[2], input_dim[3],
+           output_dim[0], output_dim[1], output_dim[2], output_dim[3], num_tokens);
+    
+    // Launch kernel configuration
+    dim3 grid(padded_num_tokens / CTA_SIZE, num_heads, batch_size);
+    dim3 block(CTA_SIZE * (head_dim / 8));
+    
+    // Dispatch based on head dimension
+    if (head_dim == 64) {
+        TransposePadPermuteKernel<64, CTA_SIZE, true, half><<<grid, block, 0, cuda_stream>>>(
+            input, output, num_tokens,
+            stride_bz_input, stride_seq_input, stride_h_input,
+            stride_bz_output, stride_d_output, stride_h_output
+        );
+    } else if (head_dim == 128) {
+        TransposePadPermuteKernel<128, CTA_SIZE, true, half><<<grid, block, 0, cuda_stream>>>(
+            input, output, num_tokens,
+            stride_bz_input, stride_seq_input, stride_h_input,
+            stride_bz_output, stride_d_output, stride_h_output
+        );
+    } else {
+        fprintf(stderr, "ERROR: Unsupported head_dim: %d (only 64 and 128 supported)\n", head_dim);
+        return;
+    }
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        fprintf(stderr, "ERROR: ccv_nnc_transpose_pad_permute_cuda_direct kernel failed: %s\n", 
+                cudaGetErrorString(error));
     }
 }
 
@@ -1276,8 +1390,8 @@ extern "C" void ccv_nnc_mean_scale_fuse_quant_cuda_direct(
 extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     half *query,              // Input Q tensor data (FP16)
     half *key,                // Input K tensor data (FP16) 
-    half *k_mean,             // Optional K mean tensor data (FP16, can be NULL)
     half *value,              // Input V tensor data (FP16)
+    half *v_transposed,       // Intermediate V tensor after transpose_pad_permute (FP16)
     int8_t *q_int8,           // Output Q quantized (INT8)
     int8_t *k_int8,           // Output K quantized (INT8)
     int8_t *v_fp8,            // Output V quantized (FP8)
@@ -1311,8 +1425,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     float sm_scale,           // Softmax scale factor
     int return_lse,           // Whether to return log-sum-exp (0 for our case)
     int pv_accum_dtype,       // PV accumulation dtype (2=FP32+FP32 for our case)
-    int km_dim[],             // K mean dimensions (can be NULL if k_mean is NULL)
-    int km_stride[],          // K mean strides (can be NULL if k_mean is NULL)
     cudaStream_t cuda_stream)
 {
     // Fixed block and warp sizes for FP8 version
@@ -1320,7 +1432,7 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     const int WARPQ = 32;
     const int BLKK = 64;
     // Validate inputs
-    assert(query && key && value && q_int8 && k_int8 && v_fp8 && 
+    assert(query && key && value && v_transposed && q_int8 && k_int8 && v_fp8 && 
            query_scale && key_scale && value_scale && output);
     
     // Only support specific configurations for now
@@ -1339,23 +1451,115 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     //     return;
     // }
     
+    // DEBUG: Check input data before quantization
+    printf("\n=== Before Quantization (Input Check) ===\n");
+    int debug_elements = 10;
+    half* temp_q_input = (half*)malloc(debug_elements * sizeof(half));
+    half* temp_k_input = (half*)malloc(debug_elements * sizeof(half));
+    
+    cudaMemcpy(temp_q_input, query, debug_elements * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(temp_k_input, key, debug_elements * sizeof(half), cudaMemcpyDeviceToHost);
+    
+    printf("Input Q sample (first 10): ");
+    for (int i = 0; i < debug_elements; i++) {
+        printf("%.6f ", (float)temp_q_input[i]);
+    }
+    printf("\n");
+    
+    printf("Input K sample (first 10): ");
+    for (int i = 0; i < debug_elements; i++) {
+        printf("%.6f ", (float)temp_k_input[i]);
+    }
+    printf("\n");
+    
+    printf("Input dimensions: Q[%d,%d,%d,%d], K[%d,%d,%d,%d]\n", 
+           qdim[0], qdim[1], qdim[2], qdim[3],
+           kdim[0], kdim[1], kdim[2], kdim[3]);
+    printf("Input strides: Q[%d,%d,%d,%d], K[%d,%d,%d,%d]\n",
+           qstride[0], qstride[1], qstride[2], qstride[3],
+           kstride[0], kstride[1], kstride[2], kstride[3]);
+    
+    free(temp_q_input);
+    free(temp_k_input);
+    printf("=== End Input Check ===\n\n");
+    
     // Step 1: Quantize Q and K tensors using per-warp quantization
+    // Create dummy km_dim and km_stride since k_mean is NULL
+    
     ccv_nnc_per_warp_int8_direct(
-        query, key,                    // Input Q and K tensors
-        q_int8, k_int8,               // Output quantized tensors
-        query_scale, key_scale,       // Output scale tensors
-        k_mean,                       // Optional K mean tensor (NULL for our case)
-        qdim, kdim,                   // Input dimensions
-        q_int8_dim, k_int8_dim,       // Output quantized dimensions
-        query_scale_dim, key_scale_dim, // Scale dimensions
-        qstride, kstride,             // Input strides
-        q_int8_stride, k_int8_stride, // Output strides
-        query_scale_stride, key_scale_stride, // Scale strides
-        km_dim, km_stride,            // K mean dimensions and strides
-        BLKQ, WARPQ, BLKK,           // Block and warp sizes
-        tensor_layout,               // Tensor layout
-        cuda_stream                  // CUDA stream
+        query, key,                    // half *q, half *k
+        q_int8, k_int8,               // int8_t *q_int8, int8_t *k_int8
+        query_scale, key_scale,       // float *q_scale, float *k_scale
+        NULL,                         // half *km (NULL)
+        qdim, kdim,                   // int qdim[], int kdim[]
+        q_int8_dim, k_int8_dim,       // int q_int8_dim[], int k_int8_dim[]
+        query_scale_dim, key_scale_dim, // int q_scale_dim[], int k_scale_dim[]
+        NULL,                 // int km_dim[] (dummy since km is NULL)
+        qstride, kstride,             // int qstride[], int kstride[]
+        q_int8_stride, k_int8_stride, // int q_int8_stride[], int k_int8_stride[]
+        query_scale_stride, key_scale_stride, // int q_scale_stride[], int k_scale_stride[]
+        NULL,              // int km_stride[] (dummy since km is NULL)
+        BLKQ, WARPQ, BLKK,           // int BLKQ, int WARPQ, int BLKK
+        tensor_layout,                // int tensor_layout
+        cuda_stream                   // cudaStream_t cuda_stream
     );
+
+    printf("\n=== After Quantization (Debug) ===\n");
+
+    // Copy quantized data back to CPU for inspection
+    int total_elements = qdim[0] * qdim[1] * qdim[2] * qdim[3];
+    int8_t* temp_q_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
+    int8_t* temp_k_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
+
+    cudaMemcpy(temp_q_int8, q_int8, total_elements * sizeof(int8_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(temp_k_int8, k_int8, total_elements * sizeof(int8_t), cudaMemcpyDeviceToHost);
+
+    printf("DEBUG: Saving intermediate quantization results...\n");
+    printf("  q_int8 shape: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
+    printf("Q_int8 sample (first 10): ");
+    for (int i = 0; i < 10; i++) {
+        printf("%d ", temp_q_int8[i]);
+    }
+    printf("\n");
+
+    printf("  k_int8 shape: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
+    printf("k_int8 sample (first 10): ");
+    for (int i = 0; i < 10; i++) {
+        printf("%d ", temp_k_int8[i]);
+    }
+    printf("\n");
+
+    // Copy scales back to CPU
+    int q_scale_total = query_scale_dim[0] * query_scale_dim[1] * query_scale_dim[2];
+    int k_scale_total = key_scale_dim[0] * key_scale_dim[1] * key_scale_dim[2];
+    float* temp_q_scale = (float*)malloc(q_scale_total * sizeof(float));
+    float* temp_k_scale = (float*)malloc(k_scale_total * sizeof(float));
+
+    cudaMemcpy(temp_q_scale, query_scale, q_scale_total * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(temp_k_scale, key_scale, k_scale_total * sizeof(float), cudaMemcpyDeviceToHost);
+
+    printf("  q_scale shape: [%d, %d, %d]\n", 
+           query_scale_dim[0], query_scale_dim[1], query_scale_dim[2]);
+    printf("Q_scale sample (first 10): ");
+    for (int i = 0; i < (q_scale_total < 10 ? q_scale_total : 10); i++) {
+        printf("%.6f ", temp_q_scale[i]);
+    }
+    printf("\n");
+
+    printf("  k_scale shape: [%d, %d, %d]\n", 
+           key_scale_dim[0], key_scale_dim[1], key_scale_dim[2]);
+    printf("k_scale sample (first 10): ");
+    for (int i = 0; i < (k_scale_total < 10 ? k_scale_total : 10); i++) {
+        printf("%.6f ", temp_k_scale[i]);
+    }
+    printf("\n");
+
+    free(temp_q_int8);
+    free(temp_k_int8);
+    free(temp_q_scale);
+    free(temp_k_scale);
+
+    printf("=== End Debug ===\n\n");
     
     // Check for errors after Q/K quantization
     cudaError_t error = cudaGetLastError();
@@ -1365,36 +1569,99 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
         return;
     }
     
-    // Step 2: Quantize V tensor to FP8 using per-channel quantization
-    // For NHD layout, V is [B, S, H, D] and needs to be transformed to [B, D, H, padded_S]
-    // The ccv_nnc_scale_fuse_quant_cuda_direct function handles this transformation
+    // Step 2: Transform and Quantize V tensor to FP8 using transpose_pad_permute + scale_fuse_quant
+    // For NHD layout, V is [B, S, H, D] and needs to be transformed to [B, D, H, padded_S] first
     
-    // Extract actual sequence length from vdim
-    int batch_size = vdim[0];
     int seq_len = vdim[1];     // For NHD layout
-    int num_heads = vdim[2];   // For NHD layout
-    int head_dim = vdim[3];
-    
-    // V FP8 dimensions should be [B, D, H, padded_S] for NHD layout
-    // This is handled by the scale_fuse_quant function which does transpose_pad_permute
-    
     const float scale_max = 448.0f;  // E4M3 max scale for FP8
     
+    // DEBUG: Check V input before transformation
+    printf("\n=== Before V Transformation (Debug) ===\n");
+    printf("V input dimensions: [%d,%d,%d,%d]\n", vdim[0], vdim[1], vdim[2], vdim[3]);
+    printf("V output dimensions: [%d,%d,%d,%d]\n", v_fp8_dim[0], v_fp8_dim[1], v_fp8_dim[2], v_fp8_dim[3]);
+    printf("V scale dimensions: [%d,%d,%d]\n", value_scale_dim[0], value_scale_dim[1], value_scale_dim[2]);
+    printf("seq_len: %d, scale_max: %f, tensor_layout: %d\n", seq_len, scale_max, tensor_layout);
+    
+    // Check V input values
+    half* temp_v_input = (half*)malloc(10 * sizeof(half));
+    cudaMemcpy(temp_v_input, value, 10 * sizeof(half), cudaMemcpyDeviceToHost);
+    printf("V input sample (first 10): ");
+    for (int i = 0; i < 10; i++) {
+        printf("%.6f ", (float)temp_v_input[i]);
+    }
+    printf("\n");
+    free(temp_v_input);
+    printf("=== End V Input Check ===\n\n");
+    
+    // Step 2a: Transform V tensor using transpose_pad_permute
+    // [B, S, H, D] -> [B, D, H, padded_S]
+    extern void ccv_nnc_transpose_pad_permute_cuda_direct(
+        half *input, half *output,
+        int input_dim[], int output_dim[],
+        int input_stride[], int output_stride[],
+        int num_tokens, int tensor_layout, cudaStream_t cuda_stream);
+        
+    ccv_nnc_transpose_pad_permute_cuda_direct(
+        (half*)value,                // Input V tensor [B, S, H, D]
+        v_transposed,                // Output V transposed [B, D, H, padded_S]
+        vdim,                        // Input dimensions [B, S, H, D]
+        v_fp8_dim,                   // Output dimensions [B, D, H, padded_S]
+        vstride,                     // Input strides
+        v_fp8_stride,                // Output strides (reuse for transposed tensor)
+        seq_len,                     // Actual sequence length
+        tensor_layout,               // Tensor layout (0=NHD)
+        cuda_stream                  // CUDA stream
+    );
+    
+    // DEBUG: Check V after transformation
+    printf("\n=== After V Transformation (Debug) ===\n");
+    half* temp_v_transposed = (half*)malloc(10 * sizeof(half));
+    cudaMemcpy(temp_v_transposed, v_transposed, 10 * sizeof(half), cudaMemcpyDeviceToHost);
+    printf("V transposed sample (first 10): ");
+    for (int i = 0; i < 10; i++) {
+        printf("%.6f ", (float)temp_v_transposed[i]);
+    }
+    printf("\n");
+    free(temp_v_transposed);
+    printf("=== End V Transformation Check ===\n\n");
+    
+    // Step 2b: Quantize the transformed V tensor using scale_fuse_quant 
+    // Now both input and output have same dimensions [B, D, H, padded_S]
     ccv_nnc_scale_fuse_quant_cuda_direct(
-        (half*)value,                // Input V tensor (FP16)
-        v_fp8,                       // Output V quantized (FP8)
+        v_transposed,                // Input V transposed (FP16) [B, D, H, padded_S]
+        v_fp8,                       // Output V quantized (FP8) [B, D, H, padded_S]
         value_scale,                 // Output V scales (FP32)
-        vdim,                        // V input dimensions [B, S, H, D] for NHD
-        v_fp8_dim,                   // V output dimensions [B, D, H, padded_S] for NHD
+        v_fp8_dim,                   // Both input and output dimensions [B, D, H, padded_S]
+        v_fp8_dim,                   // Both input and output dimensions [B, D, H, padded_S]
         value_scale_dim,             // V scale dimensions [B, H, D]
-        vstride,                     // V input strides
-        v_fp8_stride,                // V output strides
+        v_fp8_stride,                // Input strides (same as output)
+        v_fp8_stride,                // Output strides
         value_scale_stride,          // V scale strides
         seq_len,                     // num_tokens (actual sequence length)
         scale_max,                   // Maximum scale value for FP8
         tensor_layout,               // Tensor layout (0=NHD)
         cuda_stream                  // CUDA stream
     );
+    
+    // DEBUG: Check V output after quantization
+    printf("\n=== After V Quantization (Debug) ===\n");
+    int8_t* temp_v_fp8 = (int8_t*)malloc(10 * sizeof(int8_t));
+    float* temp_v_scale = (float*)malloc(10 * sizeof(float));
+    cudaMemcpy(temp_v_fp8, v_fp8, 10 * sizeof(int8_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(temp_v_scale, value_scale, 10 * sizeof(float), cudaMemcpyDeviceToHost);
+    printf("V_fp8 sample (first 10): ");
+    for (int i = 0; i < 10; i++) {
+        printf("%d ", temp_v_fp8[i]);
+    }
+    printf("\n");
+    printf("V_scale sample (first 10): ");
+    for (int i = 0; i < 10; i++) {
+        printf("%.6f ", temp_v_scale[i]);
+    }
+    printf("\n");
+    free(temp_v_fp8);
+    free(temp_v_scale);
+    printf("=== End V Quantization Debug ===\n\n");
     
     // Check for errors after V quantization
     error = cudaGetLastError();
@@ -1403,6 +1670,19 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
                 cudaGetErrorString(error));
         return;
     }
+    
+    // Debug: Print dimensions being passed to kernel
+    printf("\n=== Debug: Dimensions passed to kernel ===\n");
+    printf("q_int8_dim: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
+    printf("k_int8_dim: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
+    printf("v_fp8_dim: [%d, %d, %d, %d]\n", v_fp8_dim[0], v_fp8_dim[1], v_fp8_dim[2], v_fp8_dim[3]);
+    printf("odim: [%d, %d, %d, %d]\n", odim[0], odim[1], odim[2], odim[3]);
+    printf("query_scale_dim: [%d, %d, %d]\n", query_scale_dim[0], query_scale_dim[1], query_scale_dim[2]);
+    printf("key_scale_dim: [%d, %d, %d]\n", key_scale_dim[0], key_scale_dim[1], key_scale_dim[2]);
+    printf("value_scale_dim: [%d, %d, %d]\n", value_scale_dim[0], value_scale_dim[1], value_scale_dim[2]);
+    printf("v_fp8_stride: [%d, %d, %d, %d]\n", v_fp8_stride[0], v_fp8_stride[1], v_fp8_stride[2], v_fp8_stride[3]);
+    printf("tensor_layout: %d, sm_scale: %f\n", tensor_layout, sm_scale);
+    printf("=== End Debug ===\n\n");
     
     // Step 3: Call the FP8 attention kernel with fp32+fp32 accumulation
     qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf_direct(

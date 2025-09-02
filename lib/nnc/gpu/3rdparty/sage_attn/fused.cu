@@ -559,3 +559,12 @@ template __global__ void MeanScaleKernel<64u, true, half>(half *__restrict__ inp
                                                           const uint32_t stride_bz_output, const uint32_t stride_h_output, const uint32_t stride_d_output,
                                                           const uint32_t stride_bz_mean, const uint32_t stride_h_mean,
                                                           const uint32_t stride_bz_scale, const uint32_t stride_h_scale);
+
+// Template instantiations for TransposePadPermuteKernel used by ccv_nnc_transpose_pad_permute_cuda_direct
+template __global__ void TransposePadPermuteKernel<64u, 64u, true, half>(half *__restrict__ input, half *__restrict__ output, const uint32_t num_tokens,
+                                                                          const uint32_t stride_bz_input, const uint32_t stride_seq_input, const uint32_t stride_h_input,
+                                                                          const uint32_t stride_bz_output, const uint32_t stride_d_output, const uint32_t stride_h_output);
+
+template __global__ void TransposePadPermuteKernel<128u, 64u, true, half>(half *__restrict__ input, half *__restrict__ output, const uint32_t num_tokens,
+                                                                           const uint32_t stride_bz_input, const uint32_t stride_seq_input, const uint32_t stride_h_input,
+                                                                           const uint32_t stride_bz_output, const uint32_t stride_d_output, const uint32_t stride_h_output);
