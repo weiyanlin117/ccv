@@ -181,7 +181,7 @@ if [[ -d "$cuda_prefix" ]]; then
 		AC_MSG_RESULT(yes)
 		AC_SUBST(DEFINE_MACROS, ["$DEFINE_MACROS-D HAVE_CUDA_SM80 "])
 		AC_SUBST(CUDA_COMPAT_SM80_LIB, ["libnnc-compat-cuda-sm80.o"])
-		AC_SUBST(NV_SM_FLAGS, ["-arch=sm_80 -std=c++17 --expt-relaxed-constexpr"])
+		AC_SUBST(NV_SM_FLAGS, ["-arch=sm_89 -std=c++17 --expt-relaxed-constexpr"])
 	else
 		AC_MSG_RESULT(no)
 	fi

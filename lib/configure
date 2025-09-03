@@ -4643,7 +4643,7 @@ printf "%s\n" "yes" >&6; }
 
 		CUDA_COMPAT_SM80_LIB="libnnc-compat-cuda-sm80.o"
 
-		NV_SM_FLAGS="-arch=sm_80 -std=c++17 --expt-relaxed-constexpr"
+		NV_SM_FLAGS="-arch=sm_89 -std=c++17 --expt-relaxed-constexpr"
 
 	else
 		{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
