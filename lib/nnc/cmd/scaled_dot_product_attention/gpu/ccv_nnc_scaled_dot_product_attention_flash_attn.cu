@@ -109,12 +109,15 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	const int BLKK = 64;   // Block size for K quantization
 	const int WARPQ = 32;   
 	// Determine accumulation type and corresponding WARPQ based on head dimension and scale tensor shape
-	sage_attn_pv_accum_dtype pv_accum_dtype; 
+	sage_attn_pv_accum_dtype pv_accum_dtype = DTYPE_FP8_MIX_FP32; 
 	if (cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U_32F) {
-		pv_accum_dtype = DTYPE_FP32;
+		pv_accum_dtype = DTYPE_FP8_MIX_FP32;
 	} else {
-		// Default to FP32 accumulation to match PyTorch SageAttention behavior
-		pv_accum_dtype = DTYPE_FP16_MIX_FP32;
+		// should be DTYPE_FP8_MIX_FP16, however qk_int8_sv_f8_accum_f16 can not launch kernel on both pytorch reference and ccv,
+		// I suspect there is some compilation issue or driver issue. 
+		// accum_f16 vs accum_f32 kernel is same qk_int_sv_f8_attn_kernel
+		// only difference is just bool use_pv_fp16_accu=false property. 
+		pv_accum_dtype = DTYPE_FP8_MIX_FP32;
 	}
 
 	// Calculate quantization tensor dimensions
@@ -157,7 +160,7 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	// Call SageAttention with proper parameters
 	// tensor_layout: 0 for NHD (batch, seq, heads, dim), 1 for HND (batch, heads, seq, dim)
 	const int tensor_layout = 0;
-	const int is_causal = cmd.info.scaled_dot_product_attention.is_causal;
+	const int is_causal = 0;
 	const int qk_quant_gran = 2; // per_warp quantization
 	const float sm_scale = 1.0f / sqrtf((float)D); // scale = 1.0 / sqrt(head_dim)
 	const int return_lse = 0;
@@ -203,22 +206,19 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	
 	// Scale tensor strides: [batch, heads, scale_blocks]
 	int q_scale_stride[CCV_NNC_MAX_DIM_ALLOC];
-	q_scale_stride[3] = 1;                        // unused
-	q_scale_stride[2] = q_scale_blocks;                        // scale_blocks stride
-	q_scale_stride[1] = Hq * q_scale_blocks;           // head stride
-	q_scale_stride[0] = batch_size * Hq * q_scale_blocks;      // batch stride
+	q_scale_stride[2] = 1;                       
+	q_scale_stride[1] = q_scale_blocks;                // scale_blocks stride
+	q_scale_stride[0] = Hq * q_scale_blocks;           // head stride
 	
 	int k_scale_stride[CCV_NNC_MAX_DIM_ALLOC];
-	k_scale_stride[3] = 1;                        // unused
-	k_scale_stride[2] = k_scale_blocks;                        // scale_blocks stride
-	k_scale_stride[1] = Hk * k_scale_blocks;           // head stride
-	k_scale_stride[0] = batch_size * Hk * k_scale_blocks;      // batch stride
+	k_scale_stride[2] = 1;                        
+	k_scale_stride[1] = k_scale_blocks;                // scale_blocks stride
+	k_scale_stride[0] = Hk * k_scale_blocks;           // head stride
 	
 	int v_scale_stride[CCV_NNC_MAX_DIM_ALLOC];
-	v_scale_stride[3] = 1;                              // channel stride (innermost)
-	v_scale_stride[2] = D;                              // head stride
-	v_scale_stride[1] = Hk * D;                         // batch stride
-	v_scale_stride[0] = batch_size * Hk * D;            // outer stride (unused but set for consistency)
+	v_scale_stride[2] = 1;                              
+	v_scale_stride[1] = D;                              // head stride
+	v_scale_stride[0] = Hk * D;                         // batch stride
 	
 	cudaStream_t cuda_stream = ccv_nnc_stream_context_get_stream(stream_context);
 	
@@ -278,8 +278,8 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 static int _ccv_nnc_scaled_dot_product_attention_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
 {
 	// Check if we should use SageAttention for INT8 quantized attention
-	if ((cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U) || 
-	    (cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U_32F)) {
+	if ((cmd.info.scaled_dot_product_attention.is_causal == 0) && ((cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U) || 
+	    (cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U_32F))) {
 		return _ccv_nnc_scaled_dot_product_attention_sage_forw(cmd, hint, flags, inputs, input_size, outputs, output_size, stream_context);
 	}
 

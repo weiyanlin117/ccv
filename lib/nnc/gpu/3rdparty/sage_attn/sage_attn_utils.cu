@@ -374,8 +374,8 @@ extern "C" void ccv_nnc_quant_per_warp_int8_cuda_direct(
     // Extract scale strides - these are crucial for correct scale writing!
     // batch_size, q_scale_blocks, Hq
     uint32_t stride_scale_bz, stride_scale_h;
-    stride_scale_bz = scale_stride[1];  // batch stride for scale tensor
-    stride_scale_h = scale_stride[2];   // head stride for scale tensor
+    stride_scale_bz = scale_stride[0];  // batch stride for scale tensor
+    stride_scale_h = scale_stride[1];   // head stride for scale tensor
     
     // Launch quantization kernel using QuantInt8Kernel
     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
@@ -466,8 +466,8 @@ extern "C" void ccv_nnc_quant_per_block_int8_cuda_direct(
     
     // Extract scale strides - these are crucial for correct scale writing!
     uint32_t stride_scale_bz, stride_scale_h;
-    stride_scale_bz = scale_stride[1];  // batch stride for scale tensor
-    stride_scale_h = scale_stride[2];   // head stride for scale tensor
+    stride_scale_bz = scale_stride[0];  // batch stride for scale tensor
+    stride_scale_h = scale_stride[1];   // head stride for scale tensor
     
     // Launch quantization kernel using QuantInt8Kernel
     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
@@ -570,8 +570,8 @@ extern "C" void ccv_nnc_quant_per_block_int8_fuse_sub_mean_cuda_direct(
     
     // Extract scale strides - these are crucial for correct scale writing!
     uint32_t stride_scale_bz, stride_scale_h;
-    stride_scale_bz = scale_stride[1];  // batch stride for scale tensor
-    stride_scale_h = scale_stride[2];   // head stride for scale tensor
+    stride_scale_bz = scale_stride[0];  // batch stride for scale tensor
+    stride_scale_h = scale_stride[1];   // head stride for scale tensor
     
     // Launch quantization kernel with mean subtraction using QuantInt8Kernel
     DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
@@ -1234,8 +1234,8 @@ extern "C" void ccv_nnc_scale_fuse_quant_cuda_direct(
     }
     
     // Extract scale strides - [batch, num_heads, head_dim]
-    uint32_t stride_scale_bz = scale_stride[1];  // batch stride
-    uint32_t stride_scale_h = scale_stride[2];   // num_heads stride
+    uint32_t stride_scale_bz = scale_stride[0];  // batch stride
+    uint32_t stride_scale_h = scale_stride[1];   // num_heads stride
     
     // Validate tensor dimensions
     if (output_dim[0] != input_dim[0] || output_dim[1] != input_dim[1] || 
@@ -1420,7 +1420,7 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     int qk_quant_gran,        // Quantization granularity (2=per_warp for our case)
     float sm_scale,           // Softmax scale factor
     int return_lse,           // Whether to return log-sum-exp (0 for our case)
-    int pv_accum_dtype,       // PV accumulation dtype (2=FP32+FP32 for our case)
+    int pv_accum_dtype,       // PV accumulation dtype (4=FP8+FP32, matmul in FP8, accumulate in FP32 for our case)
     cudaStream_t cuda_stream)
 {
     // Fixed block and warp sizes for FP8 version
