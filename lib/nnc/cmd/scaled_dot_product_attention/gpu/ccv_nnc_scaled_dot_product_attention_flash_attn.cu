@@ -14,19 +14,7 @@ extern "C" {
 
 // SageAttention wrapper function for INT8 quantized attention
 static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
-{
-	// Check for any pre-existing CUDA errors at function entry
-	cudaError_t entry_error = cudaGetLastError();
-	if (entry_error != cudaSuccess) {
-		printf("WARNING: Pre-existing CUDA error at function entry: %s\n", cudaGetErrorString(entry_error));
-		// Clear the error so we can continue
-		cudaGetLastError();
-	}
-	
-	// SageAttention forward pass for INT8 quantized attention
-	// Expected inputs: Q, K, V, [optional: attn_mask, weights, bias, k_mean]
-	// Expected outputs: O
-	
+{	
 	assert(input_size >= 3);
 	assert(output_size >= 1);
 	
@@ -119,7 +107,7 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	// SageAttention quantization parameters
 	const int BLKQ = 128;  // Block size for Q quantization
 	const int BLKK = 64;   // Block size for K quantization
-	
+	const int WARPQ = 32;   
 	// Determine accumulation type and corresponding WARPQ based on head dimension and scale tensor shape
 	sage_attn_pv_accum_dtype pv_accum_dtype; 
 	if (cmd.info.scaled_dot_product_attention.flags & CCV_NNC_GEMM_8U_32F) {
@@ -128,17 +116,6 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 		// Default to FP32 accumulation to match PyTorch SageAttention behavior
 		pv_accum_dtype = DTYPE_FP16_MIX_FP32;
 	}
-	// printf("pv_accum_dtype: %d", pv_accum_dtype);
-
-	int WARPQ;    
-	// Use the same logic as PyTorch SageAttention
-	if (D == 128 && pv_accum_dtype == DTYPE_FP16_MIX_FP32) {
-		// Head dimension 128 with 8 scales per head -> FP16_MIX_FP32 accumulation
-		WARPQ = 16;
-	} else {
-		// Default to FP32 accumulation with WARPQ=32
-		WARPQ = 32;
-	}
 
 	// Calculate quantization tensor dimensions
 	const size_t q_blocks = (R + BLKQ - 1) / BLKQ;
@@ -146,17 +123,9 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	const int q_scale_blocks = q_blocks * warps_per_block;
 	const int k_scale_blocks = (C + BLKK - 1) / BLKK;
 	
-	// printf("DEBUG: R=%d, BLKQ=%d, WARPQ=%d\n", R, BLKQ, WARPQ);
-	// printf("DEBUG: q_blocks=%zu, warps_per_block=%zu, q_scale_blocks=%d\n", 
-	//        q_blocks, warps_per_block, q_scale_blocks);
-	// printf("DEBUG: C=%d, BLKK=%d, k_scale_blocks=%d\n", C, BLKK, k_scale_blocks);
-	
 	// Calculate padded sequence length for V (must be multiple of 64 for SageAttention)
 	const int padded_C = ((C + 63) / 64) * 64;
-	
-	printf("DEBUG: V transformation - C=%d, padded_C=%d\n", C, padded_C);
-	printf("DEBUG: v_fp8 dimensions will be [%d, %d, %d, %d]\n", batch_size, D, Hk, padded_C);
-	
+		
 	// Calculate sizes for all workspace allocations
 	size_t q_int8_size = sizeof(int8_t) * batch_size * R * Hq * D;
 	size_t k_int8_size = sizeof(int8_t) * batch_size * C * Hk * D;
@@ -165,24 +134,9 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	size_t q_scale_size = sizeof(float) * batch_size * Hq * q_scale_blocks;
 	size_t k_scale_size = sizeof(float) * batch_size * Hk * k_scale_blocks;
 	size_t v_scale_size = sizeof(float) * batch_size * Hk * D;          // per-channel scales for V
-	// size_t k_mean_size = sizeof(half) * batch_size * 1 * Hk * D;  // FP16 data size for k_mean tensor
-	
-	// Set k_mean dimensions and strides manually for workspace tensor
-	int km_dim[CCV_NNC_MAX_DIM_ALLOC];
-	km_dim[0] = batch_size;
-	km_dim[1] = 1;
-	km_dim[2] = Hk;
-	km_dim[3] = D;
-	
-	int km_stride[CCV_NNC_MAX_DIM_ALLOC];
-	km_stride[3] = 1;           // dim stride
-	km_stride[2] = D;           // head stride  
-	km_stride[1] = Hk * D;      // seq stride (should be same as head since seq=1)
-	km_stride[0] = Hk * D;      // batch stride
 	
 	// // Get workspace size for reduction operation
 	size_t reduce_workspace_size = 0;
-	// CUDNN_ENFORCE(cudnnGetReductionWorkspaceSize(cudnn, reduce_mean, k_desc.descriptor, k_mean_desc, &reduce_workspace_size));
 	
 	// Allocate COMBINED workspace for ALL tensors including V quantization
 	size_t total_workspace_size = q_int8_size + k_int8_size + v_transposed_size + v_fp8_size + 
@@ -199,14 +153,6 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	float* k_scale_workspace = (float*)(workspace + q_int8_size + k_int8_size + v_transposed_size + v_fp8_size + q_scale_size);
 	float* v_scale_workspace = (float*)(workspace + q_int8_size + k_int8_size + v_transposed_size + v_fp8_size + 
 	                                    q_scale_size + k_scale_size);
-	//half* k_mean_workspace = (half*)(workspace + q_int8_size + k_int8_size + q_scale_size + k_scale_size);
-	// void* reduce_workspace = (reduce_workspace_size > 0) ? (workspace + q_int8_size + k_int8_size + q_scale_size + k_scale_size + k_mean_size) : NULL;
-	
-	// // Perform the reduce mean operation
-	// static const float one = 1.0f, zero = 0.0f;
-	// CUDNN_ENFORCE(cudnnReduceTensor(cudnn, reduce_mean, 0, 0, reduce_workspace, reduce_workspace_size, 
-	//                                &one, k_desc.descriptor, k_desc.data.u8, 
-	//                                &zero, k_mean_desc, k_mean_workspace));
 
 	// Call SageAttention with proper parameters
 	// tensor_layout: 0 for NHD (batch, seq, heads, dim), 1 for HND (batch, heads, seq, dim)
@@ -225,12 +171,6 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	int k_scale_dim[CCV_NNC_MAX_DIM_ALLOC] = {1, batch_size, Hk, k_scale_blocks};
 	int v_scale_dim[CCV_NNC_MAX_DIM_ALLOC] = {batch_size, Hk, D};   // V scale dimensions
 	
-	// printf("DEBUG: Our manual dimensions:\n");
-	// printf("  q_int8_dim: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
-	// printf("  k_int8_dim: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
-	// printf("  q_scale_dim: [%d, %d, %d, %d]\n", q_scale_dim[0], q_scale_dim[1], q_scale_dim[2], q_scale_dim[3]);
-	// printf("  k_scale_dim: [%d, %d, %d, %d]\n", k_scale_dim[0], k_scale_dim[1], k_scale_dim[2], k_scale_dim[3]);
-
 	// Extract tensor strides
 	int qstride[CCV_NNC_MAX_DIM_ALLOC];
 	int kstride[CCV_NNC_MAX_DIM_ALLOC];
@@ -280,16 +220,7 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	v_scale_stride[1] = Hk * D;                         // batch stride
 	v_scale_stride[0] = batch_size * Hk * D;            // outer stride (unused but set for consistency)
 	
-	printf("DEBUG: Our manual strides:\n");
-	// printf("  q_int8_stride: [%d, %d, %d, %d]\n", q_int8_stride[0], q_int8_stride[1], q_int8_stride[2], q_int8_stride[3]);
-	// printf("  k_int8_stride: [%d, %d, %d, %d]\n", k_int8_stride[0], k_int8_stride[1], k_int8_stride[2], k_int8_stride[3]);
-	printf("  q_scale_stride: [%d, %d, %d, %d]\n", q_scale_stride[0], q_scale_stride[1], q_scale_stride[2], q_scale_stride[3]);
-	printf("  k_scale_stride: [%d, %d, %d, %d]\n", k_scale_stride[0], k_scale_stride[1], k_scale_stride[2], k_scale_stride[3]);
-
-	// Get CUDA stream
-	// printf("DEBUG: stream_context pointer: %p\n", stream_context);
 	cudaStream_t cuda_stream = ccv_nnc_stream_context_get_stream(stream_context);
-	// printf("DEBUG: CUDA stream in flash_attn.cu: %p\n", cuda_stream);
 	
 	// If stream is null, use default stream (0)
 	if (cuda_stream == nullptr) {
@@ -340,13 +271,6 @@ static int _ccv_nnc_scaled_dot_product_attention_sage_forw(const ccv_nnc_cmd_t c
 	);
 
 	CUDA_ENFORCE(cudaGetLastError());
-
-	// Clean up descriptors created manually
-	// cudnnDestroyReduceTensorDescriptor(reduce_mean);
-	// cudnnDestroyTensorDescriptor(k_mean_desc);
-	
-	// Clean up CuDNN tensor view descriptor (this doesn't affect workspace)
-	// ccv_nnc_cudnn_deinit_tensor_view_descriptor(k_desc);
 
 	return CCV_NNC_EXEC_SUCCESS;
 }

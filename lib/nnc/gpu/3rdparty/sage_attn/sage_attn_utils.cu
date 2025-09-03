@@ -1145,10 +1145,6 @@ extern "C" void ccv_nnc_transpose_pad_permute_cuda_direct(
         }
     }
     
-    printf("DEBUG: transpose_pad_permute [%d,%d,%d,%d] -> [%d,%d,%d,%d], num_tokens=%d\n",
-           input_dim[0], input_dim[1], input_dim[2], input_dim[3],
-           output_dim[0], output_dim[1], output_dim[2], output_dim[3], num_tokens);
-    
     // Launch kernel configuration
     dim3 grid(padded_num_tokens / CTA_SIZE, num_heads, batch_size);
     dim3 block(CTA_SIZE * (head_dim / 8));
@@ -1435,7 +1431,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     assert(query && key && value && v_transposed && q_int8 && k_int8 && v_fp8 && 
            query_scale && key_scale && value_scale && output);
     
-    // Only support specific configurations for now
     if (tensor_layout != 0) {
         fprintf(stderr, "ERROR: ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct only supports NHD layout (tensor_layout=0)\n");
         return;
@@ -1445,43 +1440,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
         fprintf(stderr, "ERROR: ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct only supports per_warp quantization (qk_quant_gran=2)\n");
         return;
     }
-    
-    // if (pv_accum_dtype != 2) {
-    //     fprintf(stderr, "ERROR: ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct only supports fp32+fp32 accumulation (pv_accum_dtype=2)\n");
-    //     return;
-    // }
-    
-    // DEBUG: Check input data before quantization
-    printf("\n=== Before Quantization (Input Check) ===\n");
-    int debug_elements = 10;
-    half* temp_q_input = (half*)malloc(debug_elements * sizeof(half));
-    half* temp_k_input = (half*)malloc(debug_elements * sizeof(half));
-    
-    cudaMemcpy(temp_q_input, query, debug_elements * sizeof(half), cudaMemcpyDeviceToHost);
-    cudaMemcpy(temp_k_input, key, debug_elements * sizeof(half), cudaMemcpyDeviceToHost);
-    
-    printf("Input Q sample (first 10): ");
-    for (int i = 0; i < debug_elements; i++) {
-        printf("%.6f ", (float)temp_q_input[i]);
-    }
-    printf("\n");
-    
-    printf("Input K sample (first 10): ");
-    for (int i = 0; i < debug_elements; i++) {
-        printf("%.6f ", (float)temp_k_input[i]);
-    }
-    printf("\n");
-    
-    printf("Input dimensions: Q[%d,%d,%d,%d], K[%d,%d,%d,%d]\n", 
-           qdim[0], qdim[1], qdim[2], qdim[3],
-           kdim[0], kdim[1], kdim[2], kdim[3]);
-    printf("Input strides: Q[%d,%d,%d,%d], K[%d,%d,%d,%d]\n",
-           qstride[0], qstride[1], qstride[2], qstride[3],
-           kstride[0], kstride[1], kstride[2], kstride[3]);
-    
-    free(temp_q_input);
-    free(temp_k_input);
-    printf("=== End Input Check ===\n\n");
     
     // Step 1: Quantize Q and K tensors using per-warp quantization
     // Create dummy km_dim and km_stride since k_mean is NULL
@@ -1503,118 +1461,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
         tensor_layout,                // int tensor_layout
         cuda_stream                   // cudaStream_t cuda_stream
     );
-
-    printf("\n=== After Quantization (Debug) ===\n");
-
-    // Copy quantized data back to CPU for inspection
-    int total_elements = qdim[0] * qdim[1] * qdim[2] * qdim[3];
-    int8_t* temp_q_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
-    int8_t* temp_k_int8 = (int8_t*)malloc(total_elements * sizeof(int8_t));
-
-    cudaMemcpy(temp_q_int8, q_int8, total_elements * sizeof(int8_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(temp_k_int8, k_int8, total_elements * sizeof(int8_t), cudaMemcpyDeviceToHost);
-
-    printf("DEBUG: Saving intermediate quantization results...\n");
-    printf("  q_int8 shape: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
-    printf("Q_int8 sample (first 10): ");
-    for (int i = 0; i < 10; i++) {
-        printf("%d ", temp_q_int8[i]);
-    }
-    printf("\n");
-
-    printf("  k_int8 shape: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
-    printf("k_int8 sample (first 10): ");
-    for (int i = 0; i < 10; i++) {
-        printf("%d ", temp_k_int8[i]);
-    }
-    printf("\n");
-
-    // Copy scales back to CPU
-    int q_scale_total = query_scale_dim[0] * query_scale_dim[1] * query_scale_dim[2];
-    int k_scale_total = key_scale_dim[0] * key_scale_dim[1] * key_scale_dim[2];
-    float* temp_q_scale = (float*)malloc(q_scale_total * sizeof(float));
-    float* temp_k_scale = (float*)malloc(k_scale_total * sizeof(float));
-
-    cudaMemcpy(temp_q_scale, query_scale, q_scale_total * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(temp_k_scale, key_scale, k_scale_total * sizeof(float), cudaMemcpyDeviceToHost);
-
-    printf("  q_scale shape: [%d, %d, %d]\n", 
-           query_scale_dim[0], query_scale_dim[1], query_scale_dim[2]);
-    printf("Q_scale sample (first 10): ");
-    for (int i = 0; i < (q_scale_total < 10 ? q_scale_total : 10); i++) {
-        printf("%.6f ", temp_q_scale[i]);
-    }
-    printf("\n");
-
-    printf("  k_scale shape: [%d, %d, %d]\n", 
-           key_scale_dim[0], key_scale_dim[1], key_scale_dim[2]);
-    printf("k_scale sample (first 10): ");
-    for (int i = 0; i < (k_scale_total < 10 ? k_scale_total : 10); i++) {
-        printf("%.6f ", temp_k_scale[i]);
-    }
-    printf("\n");
-
-    free(temp_q_int8);
-    free(temp_k_int8);
-    free(temp_q_scale);
-    free(temp_k_scale);
-
-    printf("=== End Debug ===\n\n");
-    
-    // Save intermediate results for trial 5 debugging (only if dimensions match trial 5)
-    if (qdim[0] == 1 && qdim[1] == 5 && qdim[2] == 32 && qdim[3] == 128) {
-        printf("DEBUG: Trial 5 detected - saving CCV intermediate results...\n");
-        
-        // Save quantized Q and K tensors
-        int8_t* temp_q_int8 = (int8_t*)malloc(qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(int8_t));
-        int8_t* temp_k_int8 = (int8_t*)malloc(kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(int8_t));
-        
-        cudaMemcpy(temp_q_int8, q_int8, qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(int8_t), cudaMemcpyDeviceToHost);
-        cudaMemcpy(temp_k_int8, k_int8, kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(int8_t), cudaMemcpyDeviceToHost);
-        
-        FILE* fp = fopen("/tmp/ccv_trial5_q_int8.bin", "wb");
-        if (fp) {
-            fwrite(temp_q_int8, sizeof(int8_t), qdim[0] * qdim[1] * qdim[2] * qdim[3], fp);
-            fclose(fp);
-        }
-        
-        fp = fopen("/tmp/ccv_trial5_k_int8.bin", "wb");
-        if (fp) {
-            fwrite(temp_k_int8, sizeof(int8_t), kdim[0] * kdim[1] * kdim[2] * kdim[3], fp);
-            fclose(fp);
-        }
-        
-        // Save Q and K scales
-        // Q scales are 4-dimensional: [batch, batch, heads, scale_blocks]
-        int q_scale_total_elements = query_scale_dim[0] * query_scale_dim[1] * query_scale_dim[2] * query_scale_dim[3];
-        // K scales are 3-dimensional: [batch, batch, heads] (assuming 3D for K)
-        int k_scale_total_elements = key_scale_dim[0] * key_scale_dim[1] * key_scale_dim[2];
-        
-        float* temp_q_scales = (float*)malloc(q_scale_total_elements * sizeof(float));
-        float* temp_k_scales = (float*)malloc(k_scale_total_elements * sizeof(float));
-        
-        cudaMemcpy(temp_q_scales, query_scale, q_scale_total_elements * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(temp_k_scales, key_scale, k_scale_total_elements * sizeof(float), cudaMemcpyDeviceToHost);
-        
-        fp = fopen("/tmp/ccv_trial5_q_scales.bin", "wb");
-        if (fp) {
-            fwrite(temp_q_scales, sizeof(float), q_scale_total_elements, fp);
-            fclose(fp);
-        }
-        
-        fp = fopen("/tmp/ccv_trial5_k_scales.bin", "wb");
-        if (fp) {
-            fwrite(temp_k_scales, sizeof(float), k_scale_total_elements, fp);
-            fclose(fp);
-        }
-        
-        free(temp_q_int8);
-        free(temp_k_int8);
-        free(temp_q_scales);
-        free(temp_k_scales);
-        
-        printf("DEBUG: Saved CCV Q/K quantization results to /tmp/ccv_trial5_*\n");
-    }
     
     // Check for errors after Q/K quantization
     cudaError_t error = cudaGetLastError();
@@ -1629,24 +1475,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     
     int seq_len = vdim[1];     // For NHD layout
     const float scale_max = 448.0f;  // E4M3 max scale for FP8
-    
-    // DEBUG: Check V input before transformation
-    printf("\n=== Before V Transformation (Debug) ===\n");
-    printf("V input dimensions: [%d,%d,%d,%d]\n", vdim[0], vdim[1], vdim[2], vdim[3]);
-    printf("V output dimensions: [%d,%d,%d,%d]\n", v_fp8_dim[0], v_fp8_dim[1], v_fp8_dim[2], v_fp8_dim[3]);
-    printf("V scale dimensions: [%d,%d,%d]\n", value_scale_dim[0], value_scale_dim[1], value_scale_dim[2]);
-    printf("seq_len: %d, scale_max: %f, tensor_layout: %d\n", seq_len, scale_max, tensor_layout);
-    
-    // Check V input values
-    half* temp_v_input = (half*)malloc(10 * sizeof(half));
-    cudaMemcpy(temp_v_input, value, 10 * sizeof(half), cudaMemcpyDeviceToHost);
-    printf("V input sample (first 10): ");
-    for (int i = 0; i < 10; i++) {
-        printf("%.6f ", (float)temp_v_input[i]);
-    }
-    printf("\n");
-    free(temp_v_input);
-    printf("=== End V Input Check ===\n\n");
     
     // Step 2a: Transform V tensor using transpose_pad_permute
     // [B, S, H, D] -> [B, D, H, padded_S]
@@ -1668,18 +1496,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
         cuda_stream                  // CUDA stream
     );
     
-    // DEBUG: Check V after transformation
-    printf("\n=== After V Transformation (Debug) ===\n");
-    half* temp_v_transposed = (half*)malloc(10 * sizeof(half));
-    cudaMemcpy(temp_v_transposed, v_transposed, 10 * sizeof(half), cudaMemcpyDeviceToHost);
-    printf("V transposed sample (first 10): ");
-    for (int i = 0; i < 10; i++) {
-        printf("%.6f ", (float)temp_v_transposed[i]);
-    }
-    printf("\n");
-    free(temp_v_transposed);
-    printf("=== End V Transformation Check ===\n\n");
-    
     // Step 2b: Quantize the transformed V tensor using scale_fuse_quant 
     // Now both input and output have same dimensions [B, D, H, padded_S]
     ccv_nnc_scale_fuse_quant_cuda_direct(
@@ -1698,86 +1514,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
         cuda_stream                  // CUDA stream
     );
     
-    // DEBUG: Check V output after quantization
-    printf("\n=== After V Quantization (Debug) ===\n");
-    int8_t* temp_v_fp8 = (int8_t*)malloc(10 * sizeof(int8_t));
-    float* temp_v_scale = (float*)malloc(10 * sizeof(float));
-    cudaMemcpy(temp_v_fp8, v_fp8, 10 * sizeof(int8_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(temp_v_scale, value_scale, 10 * sizeof(float), cudaMemcpyDeviceToHost);
-    printf("V_fp8 sample (first 10): ");
-    for (int i = 0; i < 10; i++) {
-        printf("%d ", temp_v_fp8[i]);
-    }
-    printf("\n");
-    printf("V_scale sample (first 10): ");
-    for (int i = 0; i < 10; i++) {
-        printf("%.6f ", temp_v_scale[i]);
-    }
-    printf("\n");
-    free(temp_v_fp8);
-    free(temp_v_scale);
-    printf("=== End V Quantization Debug ===\n\n");
-    
-    // Save V quantization results for trial 5 debugging
-    if (qdim[0] == 1 && qdim[1] == 5 && qdim[2] == 32 && qdim[3] == 128) {
-        printf("DEBUG: Saving CCV V quantization results...\n");
-        
-        // Save V FP8 tensor
-        int8_t* temp_v_fp8 = (int8_t*)malloc(v_fp8_dim[0] * v_fp8_dim[1] * v_fp8_dim[2] * v_fp8_dim[3] * sizeof(int8_t));
-        cudaMemcpy(temp_v_fp8, v_fp8, v_fp8_dim[0] * v_fp8_dim[1] * v_fp8_dim[2] * v_fp8_dim[3] * sizeof(int8_t), cudaMemcpyDeviceToHost);
-        
-        FILE* fp = fopen("/tmp/ccv_trial5_v_fp8.bin", "wb");
-        if (fp) {
-            fwrite(temp_v_fp8, sizeof(int8_t), v_fp8_dim[0] * v_fp8_dim[1] * v_fp8_dim[2] * v_fp8_dim[3], fp);
-            fclose(fp);
-        }
-        
-        // Save V scales
-        float* temp_v_scales = (float*)malloc(value_scale_dim[0] * value_scale_dim[1] * value_scale_dim[2] * sizeof(float));
-        cudaMemcpy(temp_v_scales, value_scale, value_scale_dim[0] * value_scale_dim[1] * value_scale_dim[2] * sizeof(float), cudaMemcpyDeviceToHost);
-        
-        fp = fopen("/tmp/ccv_trial5_v_scales.bin", "wb");
-        if (fp) {
-            fwrite(temp_v_scales, sizeof(float), value_scale_dim[0] * value_scale_dim[1] * value_scale_dim[2], fp);
-            fclose(fp);
-        }
-        
-        // Save original inputs for comparison
-        half* temp_q_input = (half*)malloc(qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(half));
-        half* temp_k_input = (half*)malloc(kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(half));
-        half* temp_v_input = (half*)malloc(vdim[0] * vdim[1] * vdim[2] * vdim[3] * sizeof(half));
-        
-        cudaMemcpy(temp_q_input, query, qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(half), cudaMemcpyDeviceToHost);
-        cudaMemcpy(temp_k_input, key, kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(half), cudaMemcpyDeviceToHost);
-        cudaMemcpy(temp_v_input, value, vdim[0] * vdim[1] * vdim[2] * vdim[3] * sizeof(half), cudaMemcpyDeviceToHost);
-        
-        fp = fopen("/tmp/ccv_trial5_q_input.bin", "wb");
-        if (fp) {
-            fwrite(temp_q_input, sizeof(half), qdim[0] * qdim[1] * qdim[2] * qdim[3], fp);
-            fclose(fp);
-        }
-        
-        fp = fopen("/tmp/ccv_trial5_k_input.bin", "wb");
-        if (fp) {
-            fwrite(temp_k_input, sizeof(half), kdim[0] * kdim[1] * kdim[2] * kdim[3], fp);
-            fclose(fp);
-        }
-        
-        fp = fopen("/tmp/ccv_trial5_v_input.bin", "wb");
-        if (fp) {
-            fwrite(temp_v_input, sizeof(half), vdim[0] * vdim[1] * vdim[2] * vdim[3], fp);
-            fclose(fp);
-        }
-        
-        free(temp_v_fp8);
-        free(temp_v_scales);
-        free(temp_q_input);
-        free(temp_k_input);
-        free(temp_v_input);
-        
-        printf("DEBUG: Saved CCV V quantization results to /tmp/ccv_trial5_*\n");
-    }
-    
     // Check for errors after V quantization
     error = cudaGetLastError();
     if (error != cudaSuccess) {
@@ -1785,19 +1521,6 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
                 cudaGetErrorString(error));
         return;
     }
-    
-    // Debug: Print dimensions being passed to kernel
-    printf("\n=== Debug: Dimensions passed to kernel ===\n");
-    printf("q_int8_dim: [%d, %d, %d, %d]\n", q_int8_dim[0], q_int8_dim[1], q_int8_dim[2], q_int8_dim[3]);
-    printf("k_int8_dim: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
-    printf("v_fp8_dim: [%d, %d, %d, %d]\n", v_fp8_dim[0], v_fp8_dim[1], v_fp8_dim[2], v_fp8_dim[3]);
-    printf("odim: [%d, %d, %d, %d]\n", odim[0], odim[1], odim[2], odim[3]);
-    printf("query_scale_dim: [%d, %d, %d, %d]\n", query_scale_dim[0], query_scale_dim[1], query_scale_dim[2], query_scale_dim[3]);
-    printf("key_scale_dim: [%d, %d, %d]\n", key_scale_dim[0], key_scale_dim[1], key_scale_dim[2]);
-    printf("value_scale_dim: [%d, %d, %d]\n", value_scale_dim[0], value_scale_dim[1], value_scale_dim[2]);
-    printf("v_fp8_stride: [%d, %d, %d, %d]\n", v_fp8_stride[0], v_fp8_stride[1], v_fp8_stride[2], v_fp8_stride[3]);
-    printf("tensor_layout: %d, sm_scale: %f\n", tensor_layout, sm_scale);
-    printf("=== End Debug ===\n\n");
     
     // Step 3: Call the FP8 attention kernel with fp32+fp32 accumulation
     qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf_direct(
@@ -1831,22 +1554,5 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     if (error != cudaSuccess) {
         fprintf(stderr, "ERROR: ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct attention kernel failed: %s\n",
                 cudaGetErrorString(error));
-    }
-    
-    // Save final output for trial 5 debugging
-    if (qdim[0] == 1 && qdim[1] == 5 && qdim[2] == 32 && qdim[3] == 128) {
-        printf("DEBUG: Saving CCV final output...\n");
-        
-        half* temp_output = (half*)malloc(odim[0] * odim[1] * odim[2] * odim[3] * sizeof(half));
-        cudaMemcpy(temp_output, output, odim[0] * odim[1] * odim[2] * odim[3] * sizeof(half), cudaMemcpyDeviceToHost);
-        
-        FILE* fp = fopen("/tmp/ccv_trial5_final_output.bin", "wb");
-        if (fp) {
-            fwrite(temp_output, sizeof(half), odim[0] * odim[1] * odim[2] * odim[3], fp);
-            fclose(fp);
-        }
-        
-        free(temp_output);
-        printf("DEBUG: Saved CCV final output to /tmp/ccv_trial5_final_output.bin\n");
     }
 }
