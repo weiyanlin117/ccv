@@ -1238,8 +1238,8 @@ extern "C" void ccv_nnc_scale_fuse_quant_cuda_direct(
     }
     
     // Extract scale strides - [batch, num_heads, head_dim]
-    uint32_t stride_scale_bz = scale_stride[0];  // batch stride
-    uint32_t stride_scale_h = scale_stride[1];   // num_heads stride
+    uint32_t stride_scale_bz = scale_stride[1];  // batch stride
+    uint32_t stride_scale_h = scale_stride[2];   // num_heads stride
     
     // Validate tensor dimensions
     if (output_dim[0] != input_dim[0] || output_dim[1] != input_dim[1] || 
@@ -1561,6 +1561,61 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
 
     printf("=== End Debug ===\n\n");
     
+    // Save intermediate results for trial 5 debugging (only if dimensions match trial 5)
+    if (qdim[0] == 1 && qdim[1] == 5 && qdim[2] == 32 && qdim[3] == 128) {
+        printf("DEBUG: Trial 5 detected - saving CCV intermediate results...\n");
+        
+        // Save quantized Q and K tensors
+        int8_t* temp_q_int8 = (int8_t*)malloc(qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(int8_t));
+        int8_t* temp_k_int8 = (int8_t*)malloc(kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(int8_t));
+        
+        cudaMemcpy(temp_q_int8, q_int8, qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(int8_t), cudaMemcpyDeviceToHost);
+        cudaMemcpy(temp_k_int8, k_int8, kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(int8_t), cudaMemcpyDeviceToHost);
+        
+        FILE* fp = fopen("/tmp/ccv_trial5_q_int8.bin", "wb");
+        if (fp) {
+            fwrite(temp_q_int8, sizeof(int8_t), qdim[0] * qdim[1] * qdim[2] * qdim[3], fp);
+            fclose(fp);
+        }
+        
+        fp = fopen("/tmp/ccv_trial5_k_int8.bin", "wb");
+        if (fp) {
+            fwrite(temp_k_int8, sizeof(int8_t), kdim[0] * kdim[1] * kdim[2] * kdim[3], fp);
+            fclose(fp);
+        }
+        
+        // Save Q and K scales
+        // Q scales are 4-dimensional: [batch, batch, heads, scale_blocks]
+        int q_scale_total_elements = query_scale_dim[0] * query_scale_dim[1] * query_scale_dim[2] * query_scale_dim[3];
+        // K scales are 3-dimensional: [batch, batch, heads] (assuming 3D for K)
+        int k_scale_total_elements = key_scale_dim[0] * key_scale_dim[1] * key_scale_dim[2];
+        
+        float* temp_q_scales = (float*)malloc(q_scale_total_elements * sizeof(float));
+        float* temp_k_scales = (float*)malloc(k_scale_total_elements * sizeof(float));
+        
+        cudaMemcpy(temp_q_scales, query_scale, q_scale_total_elements * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(temp_k_scales, key_scale, k_scale_total_elements * sizeof(float), cudaMemcpyDeviceToHost);
+        
+        fp = fopen("/tmp/ccv_trial5_q_scales.bin", "wb");
+        if (fp) {
+            fwrite(temp_q_scales, sizeof(float), q_scale_total_elements, fp);
+            fclose(fp);
+        }
+        
+        fp = fopen("/tmp/ccv_trial5_k_scales.bin", "wb");
+        if (fp) {
+            fwrite(temp_k_scales, sizeof(float), k_scale_total_elements, fp);
+            fclose(fp);
+        }
+        
+        free(temp_q_int8);
+        free(temp_k_int8);
+        free(temp_q_scales);
+        free(temp_k_scales);
+        
+        printf("DEBUG: Saved CCV Q/K quantization results to /tmp/ccv_trial5_*\n");
+    }
+    
     // Check for errors after Q/K quantization
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
@@ -1663,6 +1718,66 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     free(temp_v_scale);
     printf("=== End V Quantization Debug ===\n\n");
     
+    // Save V quantization results for trial 5 debugging
+    if (qdim[0] == 1 && qdim[1] == 5 && qdim[2] == 32 && qdim[3] == 128) {
+        printf("DEBUG: Saving CCV V quantization results...\n");
+        
+        // Save V FP8 tensor
+        int8_t* temp_v_fp8 = (int8_t*)malloc(v_fp8_dim[0] * v_fp8_dim[1] * v_fp8_dim[2] * v_fp8_dim[3] * sizeof(int8_t));
+        cudaMemcpy(temp_v_fp8, v_fp8, v_fp8_dim[0] * v_fp8_dim[1] * v_fp8_dim[2] * v_fp8_dim[3] * sizeof(int8_t), cudaMemcpyDeviceToHost);
+        
+        FILE* fp = fopen("/tmp/ccv_trial5_v_fp8.bin", "wb");
+        if (fp) {
+            fwrite(temp_v_fp8, sizeof(int8_t), v_fp8_dim[0] * v_fp8_dim[1] * v_fp8_dim[2] * v_fp8_dim[3], fp);
+            fclose(fp);
+        }
+        
+        // Save V scales
+        float* temp_v_scales = (float*)malloc(value_scale_dim[0] * value_scale_dim[1] * value_scale_dim[2] * sizeof(float));
+        cudaMemcpy(temp_v_scales, value_scale, value_scale_dim[0] * value_scale_dim[1] * value_scale_dim[2] * sizeof(float), cudaMemcpyDeviceToHost);
+        
+        fp = fopen("/tmp/ccv_trial5_v_scales.bin", "wb");
+        if (fp) {
+            fwrite(temp_v_scales, sizeof(float), value_scale_dim[0] * value_scale_dim[1] * value_scale_dim[2], fp);
+            fclose(fp);
+        }
+        
+        // Save original inputs for comparison
+        half* temp_q_input = (half*)malloc(qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(half));
+        half* temp_k_input = (half*)malloc(kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(half));
+        half* temp_v_input = (half*)malloc(vdim[0] * vdim[1] * vdim[2] * vdim[3] * sizeof(half));
+        
+        cudaMemcpy(temp_q_input, query, qdim[0] * qdim[1] * qdim[2] * qdim[3] * sizeof(half), cudaMemcpyDeviceToHost);
+        cudaMemcpy(temp_k_input, key, kdim[0] * kdim[1] * kdim[2] * kdim[3] * sizeof(half), cudaMemcpyDeviceToHost);
+        cudaMemcpy(temp_v_input, value, vdim[0] * vdim[1] * vdim[2] * vdim[3] * sizeof(half), cudaMemcpyDeviceToHost);
+        
+        fp = fopen("/tmp/ccv_trial5_q_input.bin", "wb");
+        if (fp) {
+            fwrite(temp_q_input, sizeof(half), qdim[0] * qdim[1] * qdim[2] * qdim[3], fp);
+            fclose(fp);
+        }
+        
+        fp = fopen("/tmp/ccv_trial5_k_input.bin", "wb");
+        if (fp) {
+            fwrite(temp_k_input, sizeof(half), kdim[0] * kdim[1] * kdim[2] * kdim[3], fp);
+            fclose(fp);
+        }
+        
+        fp = fopen("/tmp/ccv_trial5_v_input.bin", "wb");
+        if (fp) {
+            fwrite(temp_v_input, sizeof(half), vdim[0] * vdim[1] * vdim[2] * vdim[3], fp);
+            fclose(fp);
+        }
+        
+        free(temp_v_fp8);
+        free(temp_v_scales);
+        free(temp_q_input);
+        free(temp_k_input);
+        free(temp_v_input);
+        
+        printf("DEBUG: Saved CCV V quantization results to /tmp/ccv_trial5_*\n");
+    }
+    
     // Check for errors after V quantization
     error = cudaGetLastError();
     if (error != cudaSuccess) {
@@ -1677,7 +1792,7 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     printf("k_int8_dim: [%d, %d, %d, %d]\n", k_int8_dim[0], k_int8_dim[1], k_int8_dim[2], k_int8_dim[3]);
     printf("v_fp8_dim: [%d, %d, %d, %d]\n", v_fp8_dim[0], v_fp8_dim[1], v_fp8_dim[2], v_fp8_dim[3]);
     printf("odim: [%d, %d, %d, %d]\n", odim[0], odim[1], odim[2], odim[3]);
-    printf("query_scale_dim: [%d, %d, %d]\n", query_scale_dim[0], query_scale_dim[1], query_scale_dim[2]);
+    printf("query_scale_dim: [%d, %d, %d, %d]\n", query_scale_dim[0], query_scale_dim[1], query_scale_dim[2], query_scale_dim[3]);
     printf("key_scale_dim: [%d, %d, %d]\n", key_scale_dim[0], key_scale_dim[1], key_scale_dim[2]);
     printf("value_scale_dim: [%d, %d, %d]\n", value_scale_dim[0], value_scale_dim[1], value_scale_dim[2]);
     printf("v_fp8_stride: [%d, %d, %d, %d]\n", v_fp8_stride[0], v_fp8_stride[1], v_fp8_stride[2], v_fp8_stride[3]);
@@ -1716,5 +1831,22 @@ extern "C" void ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct(
     if (error != cudaSuccess) {
         fprintf(stderr, "ERROR: ccv_nnc_sageattn_qk_int8_pv_fp8_cuda_direct attention kernel failed: %s\n",
                 cudaGetErrorString(error));
+    }
+    
+    // Save final output for trial 5 debugging
+    if (qdim[0] == 1 && qdim[1] == 5 && qdim[2] == 32 && qdim[3] == 128) {
+        printf("DEBUG: Saving CCV final output...\n");
+        
+        half* temp_output = (half*)malloc(odim[0] * odim[1] * odim[2] * odim[3] * sizeof(half));
+        cudaMemcpy(temp_output, output, odim[0] * odim[1] * odim[2] * odim[3] * sizeof(half), cudaMemcpyDeviceToHost);
+        
+        FILE* fp = fopen("/tmp/ccv_trial5_final_output.bin", "wb");
+        if (fp) {
+            fwrite(temp_output, sizeof(half), odim[0] * odim[1] * odim[2] * odim[3], fp);
+            fclose(fp);
+        }
+        
+        free(temp_output);
+        printf("DEBUG: Saved CCV final output to /tmp/ccv_trial5_final_output.bin\n");
     }
 }
