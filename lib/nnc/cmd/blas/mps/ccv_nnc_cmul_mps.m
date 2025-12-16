@@ -211,6 +211,15 @@ static int _ccv_nnc_cmul_forw(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 
 static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint, const int flags, ccv_nnc_tensor_t* const* const inputs, const int input_size, ccv_nnc_tensor_t* const* const outputs, const int output_size, ccv_nnc_stream_context_t* const stream_context)
 {
+	// Detect if broadcasting was used in the forward pass.
+	// Forward: output = a * b, where a or b may have been broadcast to match output shape.
+	// inputs[0] = g (gradient, same shape as forward output)
+	// inputs[1] = a (first input from forward)
+	// inputs[2] = b (second input from forward)
+	// outputs[0] = da (gradient w.r.t. a, same shape as a)
+	// outputs[1] = db (gradient w.r.t. b, same shape as b)
+	// no_broadcasting=1 means all tensors have matching dimensions (no reduction needed)
+	// no_broadcasting=0 means some input was broadcast, requiring gradient reduction in MPSGraph path
 	int gdim[CCV_NNC_MAX_DIM_ALLOC];
 	int no_broadcasting = 1;
 	if (outputs[0])
@@ -227,9 +236,7 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 		ccv_nnc_tensor_view_get_broadcast_dim((ccv_nnc_tensor_view_t*)outputs[1], gdim);
 		no_broadcasting = no_broadcasting && (ccv_nnc_tensor_view_check_dim((ccv_nnc_tensor_view_t*)inputs[1], gdim) && ccv_nnc_tensor_view_check_dim((ccv_nnc_tensor_view_t*)outputs[1], gdim));
 	}
-	if (!no_broadcasting)
-		return CCV_NNC_EXEC_INVALID;
-	// We only support no broadcast syntax due to atomic / aggregation required for broadcast syntax.
+	// Broadcasting is supported in MPSGraph path via reduction.
 	const ccv_nnc_tensor_t* const g = inputs[0];
 	if (!g)
 		return CCV_NNC_EXEC_INVALID;
@@ -297,6 +304,10 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 				use_mfa = false;
 				fallback_reason = "Strided.";
 			}
+		}
+		if (use_mfa && !no_broadcasting) {
+			use_mfa = false;
+			fallback_reason = "Broadcasting.";
 		}
 		if (use_mfa) {
 			ccv_nnc_mfa_cmul_params_t params = {
@@ -480,6 +491,10 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 			MPSCommandBuffer* command_buffer = ccv_nnc_stream_context_start_mps_command_buffer(stream_context);
 			if (g)
 			{
+				// Compute gradient w.r.t. first input (a): da = g * conj(b)
+				// Forward was: output = a * b, where a had shape that may differ from output due to broadcasting
+				// In backward: g has shape of output, c (da) has shape of original a
+				// If a was broadcast in forward, we need to reduce (sum) gradients along those axes
 				if (b && c)
 				{
 					const ccv_nnc_tensor_view_t* const g = (const ccv_nnc_tensor_view_t*)inputs[0];
@@ -502,7 +517,10 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						MPSGraphShapedType* mps_b_shape = ccv_nnc_mps_graph_tensor_input_shape(b, b->info.dim, b->stride);
 						[inputShapedTypes addObject:mps_b_shape];
 						int i;
-						// Reshape to [..., n / 2, 2]
+						// Step 1: Reshape complex tensors to separate real/imag components
+						// Example: g has shape [M, N] where N is complex pairs (N = num_complex * 2)
+						// Reshape to [M, N/2, 2] to split real and imaginary parts
+						// mps_a (gradient g): [M, N] -> [M, N/2, 2]
 						NSMutableArray<NSNumber*>* a_shape = [NSMutableArray new];
 						for (i = 0; i < nd - 1; i++)
 							[a_shape addObject:@(g->info.dim[i])];
@@ -510,7 +528,11 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						[a_shape addObject: @2];
 						mps_a = [graph reshapeTensor:mps_a withShape:a_shape name:nil];
 						[a_shape release];
+						// Step 2: Split into real and imaginary parts along the last axis
+						// mps_a_splits[0] = real(g), shape [M, N/2, 1]
+						// mps_a_splits[1] = imag(g), shape [M, N/2, 1]
 						NSArray<MPSGraphTensor*>* mps_a_splits = [graph splitTensor:mps_a numSplits:2 axis:nd name:nil];
+						// mps_b (input b): [M, N] -> [M, N/2, 2] (or [1, N] -> [1, N/2, 2] if broadcast)
 						NSMutableArray<NSNumber*>* b_shape = [NSMutableArray new];
 						for (i = 0; i < nd - 1; i++)
 							[b_shape addObject:@(b->info.dim[i])];
@@ -518,13 +540,42 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						[b_shape addObject: @2];
 						mps_b = [graph reshapeTensor:mps_b withShape:b_shape name:nil];
 						[b_shape release];
+						// mps_b_splits[0] = real(b), mps_b_splits[1] = imag(b)
 						NSArray<MPSGraphTensor*>* mps_b_splits = [graph splitTensor:mps_b numSplits:2 axis:nd name:nil];
+						// Step 3: Compute complex conjugate multiplication: g * conj(b)
+						// conj(b) = real(b) - i*imag(b)
+						// g * conj(b) = (real(g) + i*imag(g)) * (real(b) - i*imag(b))
+						//             = (real(g)*real(b) + imag(g)*imag(b)) + i*(imag(g)*real(b) - real(g)*imag(b))
+						// mps_c_0 = real part = real(g)*real(b) + imag(g)*imag(b)
+						// mps_c_1 = imag part = imag(g)*real(b) - real(g)*imag(b)
+						// Result shape: [M, N/2, 1] (broadcasts if b has dim 1 where g has dim M)
 						MPSGraphTensor* mps_c_0 = [graph additionWithPrimaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[0] secondaryTensor:mps_b_splits[0] name:nil] secondaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[1] secondaryTensor:mps_b_splits[1] name:nil] name:nil];
 						MPSGraphTensor* mps_c_1 = [graph subtractionWithPrimaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[1] secondaryTensor:mps_b_splits[0] name:nil] secondaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[0] secondaryTensor:mps_b_splits[1] name:nil] name:nil];
+						// Step 4: Concatenate real and imag parts back together
+						// [M, N/2, 1] concat [M, N/2, 1] along axis nd -> [M, N/2, 2]
+						MPSGraphTensor* mps_c = [graph concatTensor:mps_c_0 withTensor:mps_c_1 dimension:nd name:nil];
+						// Step 5: Handle broadcasting reduction
+						// If original input 'a' was broadcast (e.g., a=[1,N], output=[M,N]),
+						// gradients must be summed along broadcast axes to match 'a's shape.
+						// Example: g=[M,N], c(da)=[1,N] -> reduce axis 0, result [1,N]
+						// Current mps_c shape: [M, N/2, 2], target c shape: [1, N]
+						NSMutableArray<NSNumber*>* reduction_axes = [NSMutableArray new];
+						for (i = 0; i < nd - 1; i++)
+							if (g->info.dim[i] > c->info.dim[i])
+								[reduction_axes addObject:@(i)];
+						// Check the last dimension (complex pairs)
+						if (g->info.dim[nd - 1] > c->info.dim[nd - 1])
+							[reduction_axes addObject:@(nd - 1)];
+						// After reduction: [M, N/2, 2] with axis 0 reduced -> [1, N/2, 2]
+						if (reduction_axes.count > 0)
+							mps_c = [graph reductionSumWithTensor:mps_c axes:reduction_axes name:nil];
+						[reduction_axes release];
+						// Step 6: Reshape to final output shape
+						// [1, N/2, 2] -> [1, N] to match c's expected shape
 						NSMutableArray<NSNumber*>* c_shape = [NSMutableArray new];
 						for (i = 0; i < nd; i++)
 							[c_shape addObject:@(c->info.dim[i])];
-						MPSGraphTensor* mps_c = [graph reshapeTensor:[graph concatTensor:mps_c_0 withTensor:mps_c_1 dimension:nd name:nil] withShape:c_shape name:nil];
+						mps_c = [graph reshapeTensor:mps_c withShape:c_shape name:nil];
 						[resultTensors addObject:mps_c];
 						[c_shape release];
 					});
@@ -533,6 +584,10 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 					MPSGraphTensorData* data[] = {data_a, data_b};
 					ccv_nnc_mps_graph_executable_result(executable, command_buffer, @[data[indices[0]], data[indices[1]]], &c, (int*[]){ c->info.dim }, (int*[]){ c->stride }, 1, 0);
 				}
+				// Compute gradient w.r.t. second input (b): db = g * conj(a)
+				// Forward was: output = a * b, where b had shape that may differ from output due to broadcasting
+				// In backward: g has shape of output, d (db) has shape of original b
+				// If b was broadcast in forward, we need to reduce (sum) gradients along those axes
 				if (a && d)
 				{
 					const ccv_nnc_tensor_view_t* const g = (const ccv_nnc_tensor_view_t*)inputs[0];
@@ -555,7 +610,8 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						MPSGraphShapedType* mps_b_shape = ccv_nnc_mps_graph_tensor_input_shape(a, a->info.dim, a->stride);
 						[inputShapedTypes addObject:mps_b_shape];
 						int i;
-						// Reshape to [..., n / 2, 2]
+						// Step 1: Reshape complex tensors to separate real/imag components
+						// mps_a (gradient g): [M, N] -> [M, N/2, 2]
 						NSMutableArray<NSNumber*>* a_shape = [NSMutableArray new];
 						for (i = 0; i < nd - 1; i++)
 							[a_shape addObject:@(g->info.dim[i])];
@@ -563,7 +619,9 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						[a_shape addObject: @2];
 						mps_a = [graph reshapeTensor:mps_a withShape:a_shape name:nil];
 						[a_shape release];
+						// Step 2: Split into real and imaginary parts
 						NSArray<MPSGraphTensor*>* mps_a_splits = [graph splitTensor:mps_a numSplits:2 axis:nd name:nil];
+						// mps_b (input a): reshape similarly
 						NSMutableArray<NSNumber*>* b_shape = [NSMutableArray new];
 						for (i = 0; i < nd - 1; i++)
 							[b_shape addObject:@(a->info.dim[i])];
@@ -572,12 +630,28 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						mps_b = [graph reshapeTensor:mps_b withShape:b_shape name:nil];
 						[b_shape release];
 						NSArray<MPSGraphTensor*>* mps_b_splits = [graph splitTensor:mps_b numSplits:2 axis:nd name:nil];
+						// Step 3: Compute complex conjugate multiplication: g * conj(a)
+						// Same formula as above but with input 'a' instead of 'b'
 						MPSGraphTensor* mps_c_0 = [graph additionWithPrimaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[0] secondaryTensor:mps_b_splits[0] name:nil] secondaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[1] secondaryTensor:mps_b_splits[1] name:nil] name:nil];
 						MPSGraphTensor* mps_c_1 = [graph subtractionWithPrimaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[1] secondaryTensor:mps_b_splits[0] name:nil] secondaryTensor:[graph multiplicationWithPrimaryTensor:mps_a_splits[0] secondaryTensor:mps_b_splits[1] name:nil] name:nil];
+						// Step 4: Concatenate real and imag parts
+						MPSGraphTensor* mps_c = [graph concatTensor:mps_c_0 withTensor:mps_c_1 dimension:nd name:nil];
+						// Step 5: Handle broadcasting reduction for gradient w.r.t. b
+						// If b was broadcast, reduce along those axes
+						NSMutableArray<NSNumber*>* reduction_axes = [NSMutableArray new];
+						for (i = 0; i < nd - 1; i++)
+							if (g->info.dim[i] > d->info.dim[i])
+								[reduction_axes addObject:@(i)];
+						if (g->info.dim[nd - 1] > d->info.dim[nd - 1])
+							[reduction_axes addObject:@(nd - 1)];
+						if (reduction_axes.count > 0)
+							mps_c = [graph reductionSumWithTensor:mps_c axes:reduction_axes name:nil];
+						[reduction_axes release];
+						// Step 6: Reshape to final output shape
 						NSMutableArray<NSNumber*>* c_shape = [NSMutableArray new];
 						for (i = 0; i < nd; i++)
 							[c_shape addObject:@(d->info.dim[i])];
-						MPSGraphTensor* mps_c = [graph reshapeTensor:[graph concatTensor:mps_c_0 withTensor:mps_c_1 dimension:nd name:nil] withShape:c_shape name:nil];
+						mps_c = [graph reshapeTensor:mps_c withShape:c_shape name:nil];
 						[resultTensors addObject:mps_c];
 						[c_shape release];
 					});
