@@ -305,10 +305,6 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 				fallback_reason = "Strided.";
 			}
 		}
-		if (use_mfa && !no_broadcasting) {
-			use_mfa = false;
-			fallback_reason = "Broadcasting.";
-		}
 		if (use_mfa) {
 			ccv_nnc_mfa_cmul_params_t params = {
 				.conjugate = 1,
@@ -318,6 +314,19 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 				.cstride = {0, 0, 0},
 				.dim = {0, 0, 0, 0}
 			};
+			// Check if we need reduction for c (da) or d (db) due to broadcasting
+			const size_t g_count = ccv_nnc_tensor_count(g->info);
+			const size_t c_count = c ? ccv_nnc_tensor_count(c->info) : 0;
+			const size_t d_count = d ? ccv_nnc_tensor_count(d->info) : 0;
+			const int c_needs_reduction = (b && c && c_count < g_count);
+			const int d_needs_reduction = (a && d && d_count < g_count);
+			// Allocate temp buffers if needed for reduction
+			mtl_buffer_t* c_temp_buffer = NULL;
+			mtl_buffer_t* d_temp_buffer = NULL;
+			if (c_needs_reduction)
+				c_temp_buffer = (mtl_buffer_t*)mpobjmalloc(0, CCV_GET_DATA_TYPE_SIZE(g->info.datatype) * g_count);
+			if (d_needs_reduction)
+				d_temp_buffer = (mtl_buffer_t*)mpobjmalloc(0, CCV_GET_DATA_TYPE_SIZE(g->info.datatype) * g_count);
 			mtl_command_batch_t* command_batch = ccv_nnc_stream_context_start_command_batch(stream_context);
 			if (g)
 			{
@@ -388,18 +397,66 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						params.cstride[1] = cstride[2];
 						params.cstride[2] = cstride[3];
 					}
+					// When c needs reduction, recompute params to output g's shape
+					if (c_needs_reduction)
+					{
+						int i;
+						int nd = ccv_nnc_tensor_nd(g->info.dim);
+						int gdim[CCV_NNC_MAX_DIM_ALLOC];
+						int bdim_arr[CCV_NNC_MAX_DIM_ALLOC];
+						int squeezed_dims = 0;
+						for (i = nd - 1; i >= 0; i--)
+						{
+							if (g->info.dim[i] == 1)
+								continue;
+							gdim[squeezed_dims] = g->info.dim[i];
+							bdim_arr[squeezed_dims] = b->info.dim[i];
+							squeezed_dims += 1;
+						}
+						nd = squeezed_dims;
+						int gstride[CCV_NNC_MAX_DIM_ALLOC];
+						int bstride_arr[CCV_NNC_MAX_DIM_ALLOC];
+						gstride[0] = 1;
+						bstride_arr[0] = 1;
+						for (i = 1; i < nd; i++)
+						{
+							gstride[i] = gdim[i - 1] * gstride[i - 1];
+							bstride_arr[i] = bdim_arr[i - 1] * bstride_arr[i - 1];
+						}
+						for (i = 0; i < nd; i++)
+						{
+							if (gdim[i] != bdim_arr[i])
+							{
+								assert(bdim_arr[i] == 1);
+								bstride_arr[i] = 0;
+							}
+						}
+						params.dim[0] = gdim[0];
+						params.dim[1] = nd > 1 ? gdim[1] : 0;
+						params.dim[2] = nd > 2 ? gdim[2] : 0;
+						params.dim[3] = nd > 3 ? gdim[3] : 0;
+						params.astride[0] = nd > 1 ? gstride[1] : 0;
+						params.astride[1] = nd > 2 ? gstride[2] : 0;
+						params.astride[2] = nd > 3 ? gstride[3] : 0;
+						params.bstride[0] = nd > 1 ? bstride_arr[1] : 0;
+						params.bstride[1] = nd > 2 ? bstride_arr[2] : 0;
+						params.bstride[2] = nd > 3 ? bstride_arr[3] : 0;
+						params.cstride[0] = nd > 1 ? gstride[1] : 0;
+						params.cstride[1] = nd > 2 ? gstride[2] : 0;
+						params.cstride[2] = nd > 3 ? gstride[3] : 0;
+					}
 					ccv_nnc_mfa_prepare_cmul(context, params);
 
 					mtl_buffer_t* tensors[4] = {
 						mpgetbuffer(g), // gradient
 						mpgetbuffer(b), // source
-						mpgetbuffer(c), // destination
+						c_needs_reduction ? c_temp_buffer : mpgetbuffer(c), // destination
 						NULL,
 					};
 					size_t tensor_offsets[3] = {
 						g->dataof,
 						b->dataof,
-						c->dataof
+						c_needs_reduction ? 0 : c->dataof
 					};
 					ccv_nnc_mfa_encode_cmul(context, params, command_batch, tensors, tensor_offsets);
 				}
@@ -470,23 +527,140 @@ static int _ccv_nnc_cmul_back(const ccv_nnc_cmd_t cmd, const ccv_nnc_hint_t hint
 						params.cstride[1] = cstride[2];
 						params.cstride[2] = cstride[3];
 					}
+					// When d needs reduction, recompute params to output g's shape
+					if (d_needs_reduction)
+					{
+						int i;
+						int nd = ccv_nnc_tensor_nd(g->info.dim);
+						int gdim[CCV_NNC_MAX_DIM_ALLOC];
+						int adim_arr[CCV_NNC_MAX_DIM_ALLOC];
+						int squeezed_dims = 0;
+						for (i = nd - 1; i >= 0; i--)
+						{
+							if (g->info.dim[i] == 1)
+								continue;
+							gdim[squeezed_dims] = g->info.dim[i];
+							adim_arr[squeezed_dims] = a->info.dim[i];
+							squeezed_dims += 1;
+						}
+						nd = squeezed_dims;
+						int gstride[CCV_NNC_MAX_DIM_ALLOC];
+						int astride_arr[CCV_NNC_MAX_DIM_ALLOC];
+						gstride[0] = 1;
+						astride_arr[0] = 1;
+						for (i = 1; i < nd; i++)
+						{
+							gstride[i] = gdim[i - 1] * gstride[i - 1];
+							astride_arr[i] = adim_arr[i - 1] * astride_arr[i - 1];
+						}
+						for (i = 0; i < nd; i++)
+						{
+							if (gdim[i] != adim_arr[i])
+							{
+								assert(adim_arr[i] == 1);
+								astride_arr[i] = 0;
+							}
+						}
+						params.dim[0] = gdim[0];
+						params.dim[1] = nd > 1 ? gdim[1] : 0;
+						params.dim[2] = nd > 2 ? gdim[2] : 0;
+						params.dim[3] = nd > 3 ? gdim[3] : 0;
+						params.astride[0] = nd > 1 ? gstride[1] : 0;
+						params.astride[1] = nd > 2 ? gstride[2] : 0;
+						params.astride[2] = nd > 3 ? gstride[3] : 0;
+						params.bstride[0] = nd > 1 ? astride_arr[1] : 0;
+						params.bstride[1] = nd > 2 ? astride_arr[2] : 0;
+						params.bstride[2] = nd > 3 ? astride_arr[3] : 0;
+						params.cstride[0] = nd > 1 ? gstride[1] : 0;
+						params.cstride[1] = nd > 2 ? gstride[2] : 0;
+						params.cstride[2] = nd > 3 ? gstride[3] : 0;
+					}
 					ccv_nnc_mfa_prepare_cmul(context, params);
 
 					mtl_buffer_t* tensors[4] = {
 						mpgetbuffer(g), // gradient
 						mpgetbuffer(a), // source
-						mpgetbuffer(d), // destination
+						d_needs_reduction ? d_temp_buffer : mpgetbuffer(d), // destination
 						NULL,
 					};
 					size_t tensor_offsets[3] = {
 						g->dataof,
 						a->dataof,
-						d->dataof
+						d_needs_reduction ? 0 : d->dataof
 					};
 					ccv_nnc_mfa_encode_cmul(context, params, command_batch, tensors, tensor_offsets);
 				}
 			}
 			ccv_nnc_stream_context_finish_command_batch(stream_context, command_batch);
+			// If we need reduction, use MPSGraph to reduce from temp buffer to final output
+			if (c_needs_reduction || d_needs_reduction)
+			{
+				MPSCommandBuffer* command_buffer = ccv_nnc_stream_context_start_mps_command_buffer(stream_context);
+				if (c_needs_reduction)
+				{
+					const ccv_nnc_tensor_view_t* const gv = (const ccv_nnc_tensor_view_t*)g;
+					ccv_nnc_tensor_view_t* const cv = (ccv_nnc_tensor_view_t*)c;
+					// Create a fake tensor_view for the temp buffer with g's shape
+					ccv_nnc_tensor_view_t temp_view = *gv;
+					ccv_nnc_mps_graph_key_t key = ccv_nnc_mps_graph_key_new(cmd, 2, hint, flags, inputs, input_size, outputs, output_size);
+					int indices[1];
+					const int nd = ccv_nnc_tensor_nd(gv->info.dim);
+					MPSGraphExecutable* executable = ccv_nnc_mps_graph_executable_cache(key, indices, ^void (MPSGraph* graph, NSMutableArray<MPSGraphTensor*>* inputTensors, NSMutableArray<MPSGraphShapedType*>* inputShapedTypes, NSMutableArray<MPSGraphTensor*>* resultTensors) {
+						MPSGraphTensor* mps_input;
+						MPSGraphTensor* mps_temp = ccv_nnc_mps_graph_tensor_input(graph, &temp_view, gv->info.dim, gv->stride, &mps_input);
+						[inputTensors addObject:mps_input];
+						MPSGraphShapedType* mps_temp_shape = ccv_nnc_mps_graph_tensor_input_shape(&temp_view, gv->info.dim, gv->stride);
+						[inputShapedTypes addObject:mps_temp_shape];
+						// Determine reduction axes
+						NSMutableArray<NSNumber*>* reduction_axes = [NSMutableArray new];
+						for (int i = 0; i < nd; i++)
+							if (gv->info.dim[i] > cv->info.dim[i])
+								[reduction_axes addObject:@(i)];
+						MPSGraphTensor* mps_c = mps_temp;
+						if (reduction_axes.count > 0)
+							mps_c = [graph reductionSumWithTensor:mps_temp axes:reduction_axes name:nil];
+						[reduction_axes release];
+						[resultTensors addObject:mps_c];
+					});
+					MPSGraphTensorData* data_temp = ccv_nnc_mps_graph_tensor_data_with_buffer(&temp_view, gv->info.dim, gv->stride, c_temp_buffer, 0);
+					ccv_nnc_mps_graph_executable_result(executable, command_buffer, @[data_temp], &cv, (int*[]){ cv->info.dim }, (int*[]){ cv->stride }, 1, 0);
+				}
+				if (d_needs_reduction)
+				{
+					const ccv_nnc_tensor_view_t* const gv = (const ccv_nnc_tensor_view_t*)g;
+					ccv_nnc_tensor_view_t* const dv = (ccv_nnc_tensor_view_t*)d;
+					// Create a fake tensor_view for the temp buffer with g's shape
+					ccv_nnc_tensor_view_t temp_view = *gv;
+					ccv_nnc_mps_graph_key_t key = ccv_nnc_mps_graph_key_new(cmd, 3, hint, flags, inputs, input_size, outputs, output_size);
+					int indices[1];
+					const int nd = ccv_nnc_tensor_nd(gv->info.dim);
+					MPSGraphExecutable* executable = ccv_nnc_mps_graph_executable_cache(key, indices, ^void (MPSGraph* graph, NSMutableArray<MPSGraphTensor*>* inputTensors, NSMutableArray<MPSGraphShapedType*>* inputShapedTypes, NSMutableArray<MPSGraphTensor*>* resultTensors) {
+						MPSGraphTensor* mps_input;
+						MPSGraphTensor* mps_temp = ccv_nnc_mps_graph_tensor_input(graph, &temp_view, gv->info.dim, gv->stride, &mps_input);
+						[inputTensors addObject:mps_input];
+						MPSGraphShapedType* mps_temp_shape = ccv_nnc_mps_graph_tensor_input_shape(&temp_view, gv->info.dim, gv->stride);
+						[inputShapedTypes addObject:mps_temp_shape];
+						// Determine reduction axes
+						NSMutableArray<NSNumber*>* reduction_axes = [NSMutableArray new];
+						for (int i = 0; i < nd; i++)
+							if (gv->info.dim[i] > dv->info.dim[i])
+								[reduction_axes addObject:@(i)];
+						MPSGraphTensor* mps_d = mps_temp;
+						if (reduction_axes.count > 0)
+							mps_d = [graph reductionSumWithTensor:mps_temp axes:reduction_axes name:nil];
+						[reduction_axes release];
+						[resultTensors addObject:mps_d];
+					});
+					MPSGraphTensorData* data_temp = ccv_nnc_mps_graph_tensor_data_with_buffer(&temp_view, gv->info.dim, gv->stride, d_temp_buffer, 0);
+					ccv_nnc_mps_graph_executable_result(executable, command_buffer, @[data_temp], &dv, (int*[]){ dv->info.dim }, (int*[]){ dv->stride }, 1, 0);
+				}
+				ccv_nnc_stream_context_finish_mps_command_buffer(stream_context, command_buffer);
+			}
+			// Free temp buffers
+			if (c_temp_buffer)
+				mpobjfree(0, c_temp_buffer);
+			if (d_temp_buffer)
+				mpobjfree(0, d_temp_buffer);
 		} else {
 			MPSCommandBuffer* command_buffer = ccv_nnc_stream_context_start_mps_command_buffer(stream_context);
 			if (g)
