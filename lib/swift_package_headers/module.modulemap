@@ -1,4 +1,5 @@
 module C_ccv {
+    use C_sfmt
     header "../ccv.h"
     header "../ccv_internal.h"
     textual header "../nnc/ccv_nnc_tfb.h"
