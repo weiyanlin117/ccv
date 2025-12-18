@@ -1,7 +1,7 @@
 module C_sfmt {
-    header "SFMT.h"
-    header "SFMT-common.h"
-    header "SFMT-params.h"
-    header "SFMT-params19937.h"
+    header "../SFMT.h"
+    header "../SFMT-common.h"
+    header "../SFMT-params.h"
+    header "../SFMT-params19937.h"
     export *
 }
