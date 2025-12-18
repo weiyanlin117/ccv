@@ -1,0 +1,14 @@
+module C_nnc {
+    use C_ccv
+    textual header "../../ccv.h"
+    textual header "../../ccv_internal.h"
+    header "../ccv_nnc.h"
+    header "../ccv_nnc_easy.h"
+    header "../ccv_nnc_internal.h"
+    header "../ccv_nnc_tfb.h"
+    header "../co.h"
+    header "../cmd/ccv_nnc_backend.h"
+    header "../cmd/ccv_nnc_cmd_easy.h"
+    header "../cmd/ccv_nnc_cmd.h"
+    export *
+}
