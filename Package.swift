@@ -163,6 +163,7 @@ let package = Package(
             cSettings: [
                 .headerSearchPath("."),
                 .headerSearchPath(".."),
+                .headerSearchPath("../../lib"), // Explicitly point to the directory containing ccv.h
                 .headerSearchPath("cmd"),
                 .headerSearchPath("mfa"),
                 .headerSearchPath("mfa/3rdparty/metal-cpp"),
