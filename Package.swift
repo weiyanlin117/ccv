@@ -30,7 +30,7 @@ let package = Package(
                 "SFMT-sse2.h",  // SSE2 (x86) - not available on ARM
             ],
             sources: ["SFMT.c"],
-            publicHeadersPath: ".",
+            publicHeadersPath: "spm_headers",
             cSettings: [
                 .headerSearchPath("."),
                 .unsafeFlags(["-w"])
@@ -89,6 +89,7 @@ let package = Package(
             ],
             publicHeadersPath: ".",
             cSettings: [
+                .unsafeFlags(["-fmodule-map-file=lib/swift_pm_module.modulemap"]),
                 .headerSearchPath("."),
                 .define("HAVE_CBLAS"),
                 .define("HAVE_PTHREAD"),
@@ -158,6 +159,7 @@ let package = Package(
             ],
             publicHeadersPath: ".",
             cSettings: [
+                .unsafeFlags(["-fmodule-map-file=lib/nnc/swift_pm_module.modulemap"]),
                 .headerSearchPath("."),
                 .headerSearchPath(".."),
                 .headerSearchPath("cmd"),
@@ -186,73 +188,6 @@ let package = Package(
                 .linkedFramework("MetalPerformanceShaders"),
                 .linkedFramework("MetalPerformanceShadersGraph"),
                 .linkedFramework("Foundation"),
-            ]
-        ),
-
-        // Test case framework (header-only)
-        .target(
-            name: "ccv_case",
-            path: "test",
-            exclude: [
-                "unit",
-                "int",
-                "regression",
-                "all.mk",
-                "all.mk.erb",
-                "all.rb",
-                "all.tests.c",
-                "cover-gen.rb",
-                "known-leaks.txt",
-                "makefile",
-            ],
-            sources: [],
-            publicHeadersPath: ".",
-            cSettings: [
-                .headerSearchPath("."),
-            ]
-        ),
-
-        // MPS BLAS integration test
-        .executableTarget(
-            name: "mpsblas.tests",
-            dependencies: ["C_nnc", "ccv_case", "dSFMT"],
-            path: "test/int/nnc",
-            sources: ["mpsblas.tests.c"],
-            cSettings: [
-                .headerSearchPath("../.."),
-                .headerSearchPath("../../../lib"),
-                .headerSearchPath("../../../lib/nnc"),
-                .headerSearchPath("../../../lib/3rdparty/dsfmt"),
-                .define("HAVE_CBLAS"),
-                .define("HAVE_ACCELERATE_FRAMEWORK"),
-                .define("HAVE_MPS"),
-                .unsafeFlags(["-w"])
-            ],
-            linkerSettings: [
-                .linkedLibrary("sqlite3"),
-                .unsafeFlags(["-Xlinker", "-U", "-Xlinker", "___test_case_setup", "-Xlinker", "-U", "-Xlinker", "___test_case_teardown"]),
-            ]
-        ),
-
-        // MPS DNN integration test
-        .executableTarget(
-            name: "mpsdnn.tests",
-            dependencies: ["C_nnc", "ccv_case", "dSFMT"],
-            path: "test/int/nnc",
-            sources: ["mpsdnn.tests.c"],
-            cSettings: [
-                .headerSearchPath("../.."),
-                .headerSearchPath("../../../lib"),
-                .headerSearchPath("../../../lib/nnc"),
-                .headerSearchPath("../../../lib/3rdparty/dsfmt"),
-                .define("HAVE_CBLAS"),
-                .define("HAVE_ACCELERATE_FRAMEWORK"),
-                .define("HAVE_MPS"),
-                .unsafeFlags(["-w"])
-            ],
-            linkerSettings: [
-                .linkedLibrary("sqlite3"),
-                .unsafeFlags(["-Xlinker", "-U", "-Xlinker", "___test_case_setup", "-Xlinker", "-U", "-Xlinker", "___test_case_teardown"]),
             ]
         ),
     ],
