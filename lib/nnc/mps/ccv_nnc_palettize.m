@@ -2,6 +2,7 @@
 #include "ccv_internal.h"
 #include "nnc/ccv_nnc_internal.h"
 #include "nnc/ccv_nnc_easy.h"
+#include "nnc/mfa/ccv_nnc_mfa.hpp"
 
 void ccv_nnc_mps_depalettize(const void* input, const int datatype, const size_t input_length, const int qbits, const int number_in_blocks, void* output, const size_t output_length, void* const command_buffer)
 {
