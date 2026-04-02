@@ -6,26 +6,13 @@
 #if __has_include("nnc/_ccv_nnc_stream.h")
 #include "nnc/_ccv_nnc_stream.h"
 #else
-#ifndef CCV_CO_ROUTINE_T_DEFINED
-#define CCV_CO_ROUTINE_T_DEFINED
-typedef struct co_routine_s co_routine_t;
-#endif
-
-#ifndef CCV_NNC_ASYNC_CALLBACK_TYPES_DEFINED
-#define CCV_NNC_ASYNC_CALLBACK_TYPES_DEFINED
-typedef struct {
-	ccv_nnc_callback_f fn;
-	void* callback_context;
-} ccv_nnc_async_callback_t;
-
-typedef void(*ccv_nnc_async_callback_f)(ccv_nnc_async_callback_t* const async);
-#endif
+#include "ccv_nnc_stream_fwd.h"
 #endif
 
 #if __has_include("nnc/mfa/ccv_nnc_mfa.hpp")
 #include "nnc/mfa/ccv_nnc_mfa.hpp"
 #else
-#include "../mfa/ccv_nnc_mfa_defines.hpp"
+#include "ccv_nnc_mfa_fwd.h"
 #endif
 
 void* mpheapalloc(int device, size_t size);

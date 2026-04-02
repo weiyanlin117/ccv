@@ -7,10 +7,7 @@
 
 #include "ccv.h"
 
-#ifndef CCV_CO_ROUTINE_T_DEFINED
-#define CCV_CO_ROUTINE_T_DEFINED
 typedef struct co_routine_s co_routine_t;
-#endif
 
 typedef struct {
 	int active;
