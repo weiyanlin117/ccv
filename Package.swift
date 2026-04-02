@@ -12,10 +12,10 @@ let package = Package(
     products: [
         .library(
             name: "ccv",
-            targets: ["C_swiftpm_ccv"]),
+            targets: ["C_ccv"]),
         .library(
             name: "nnc",
-            targets: ["C_swiftpm_nnc"]),
+            targets: ["C_nnc"]),
         .library(
             name: "sfmt",
             targets: ["C_sfmt"]),
@@ -74,7 +74,7 @@ let package = Package(
 
         // Main CCV library
         .target(
-            name: "C_swiftpm_ccv",
+            name: "C_ccv",
             dependencies: ["C_sfmt", "dSFMT", "kissfft", "siphash"],
             path: "lib",
             exclude: [
@@ -90,7 +90,7 @@ let package = Package(
                 "scheme.mk",
                 ".ycm_extra_conf.py",
             ],
-            publicHeadersPath: ".",
+            publicHeadersPath: "swift_package_headers",
             cSettings: [
                 .headerSearchPath("."),
                 .define("HAVE_CBLAS"),
@@ -106,8 +106,8 @@ let package = Package(
 
         // NNC - Neural Network Collection
         .target(
-            name: "C_swiftpm_nnc",
-            dependencies: ["C_swiftpm_ccv", "C_sfmt", "dSFMT"],
+            name: "C_nnc",
+            dependencies: ["C_ccv", "C_sfmt", "dSFMT"],
             path: "lib/nnc",
             exclude: [
                 // Exclude CUDA/GPU files (not needed for MPS)
@@ -160,7 +160,7 @@ let package = Package(
                 "cmd/upsample/gpu",
                 "cmd/util/gpu",
             ],
-            publicHeadersPath: ".",
+            publicHeadersPath: "swift_package_headers",
             cSettings: [
                 .headerSearchPath("."),
                 .headerSearchPath(".."),
@@ -198,7 +198,7 @@ let package = Package(
         // MPS Compatibility layer for NNC
         .target(
             name: "lib_nnc_mps_compat",
-            dependencies: ["C_swiftpm_nnc"],
+            dependencies: ["C_nnc"],
             path: "lib/nnc/mps",
             exclude: [
                 "makefile",

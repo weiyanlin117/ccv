@@ -1,0 +1,5 @@
+module C_nnc {
+    use C_ccv
+    umbrella header "C_nnc.h"
+    export *
+}
