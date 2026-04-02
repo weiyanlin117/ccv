@@ -12,7 +12,7 @@
 #if __has_include("nnc/mfa/ccv_nnc_mfa.hpp")
 #include "nnc/mfa/ccv_nnc_mfa.hpp"
 #else
-#include "ccv_nnc_mfa_fwd.h"
+#include "../mfa/ccv_nnc_mfa_defines.hpp"
 #endif
 
 void* mpheapalloc(int device, size_t size);
